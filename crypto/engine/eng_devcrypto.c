@@ -333,7 +333,7 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
  * perilous if there's a lot of data coming in (if someone wants to checksum
  * an OpenSSL tarball, for example).
  */
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL) && defined(USE_DEVCRYPTO_DIGESTS)
 
 /******************************************************************************
  *
@@ -598,7 +598,7 @@ static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
 static int devcrypto_unload(ENGINE *e)
 {
     destroy_all_cipher_methods();
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL) && defined(USE_DEVCRYPTO_DIGESTS)
     destroy_all_digest_methods();
 #endif
     return 1;
@@ -618,7 +618,7 @@ void engine_load_devcrypto_int()
     }
 
     prepare_cipher_methods();
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL) && defined(USE_DEVCRYPTO_DIGESTS)
     prepare_digest_methods();
 #endif
 
@@ -664,7 +664,7 @@ void engine_load_devcrypto_int()
 # endif
 #endif
         || !ENGINE_set_ciphers(e, devcrypto_ciphers)
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL) && defined(USE_DEVCRYPTO_DIGESTS)
         || !ENGINE_set_digests(e, devcrypto_digests)
 #endif
         ) {
