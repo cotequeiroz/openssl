@@ -399,10 +399,12 @@ static int digest_init(EVP_MD_CTX *ctx)
     memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
     digest_ctx->sess.mac = digest_d->devcryptoid;
     if (ioctl(cfd, CIOCGSESSION, &digest_ctx->sess) < 0) {
+        fprintf(stderr, "digest_init: error initializing /dev/crypto session\n");
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
+    fprintf(stderr, "digest_init: digest=%d, FD=%d, Session=%d\n", digest_d->devcryptoid, cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -430,10 +432,12 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
         return 1;
 
     if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) < 0) {
+        fprintf(stderr, "digest_update: error calling CIOCCRYPT - FD=%d Session=%d\n", cfd, digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
+    fprintf(stderr, "digest_update: FD=%d, Session=%d\n", cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -442,11 +446,12 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
+    fprintf(stderr, "digest_final: FD=%d, Session=%d\n", cfd, digest_ctx->sess.ses);
     if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
+        fprintf(stderr, "digest_final: error calling CIOCCRYPT - FD=%d Session=%d\n", cfd, digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
-
     return 1;
 }
 
@@ -458,16 +463,22 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
     struct digest_ctx *to_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(to);
 
-    if (from_ctx == NULL || to_ctx == NULL)
+    if (from_ctx == NULL || to_ctx == NULL) {
+        fprintf(stderr, "digest_copy: %s is NULL.\n", 
+	    from_ctx ? "from_ctx" : "to_ctx"); 
         return 0;
+    }
 
     if (!digest_init(to))
         return 0;
     cp_hash_op.src_ses = from_ctx->sess.ses;
     cp_hash_op.dst_ses = to_ctx->sess.ses;
+    fprintf(stderr, "digest_copy: FD=%d, From Session=%d, To Sesion=%d\n",
+        cfd, from_ctx->sess.ses, to_ctx->sess.ses);
     if (ioctl(cfd, CIOCCPHASH, &cp_hash_op) < 0) {
+        fprintf(stderr, "digest_copy: error calling CIOCCPHASH\n");
         SYSerr(SYS_F_IOCTL, errno);
-        return 0 ;
+        return 0;
     }
     return 1;
 }
@@ -477,10 +488,14 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    if (digest_ctx == NULL)
-        return 0;
+    if (digest_ctx == NULL) {
+        fprintf(stderr, "digest_cleanup: digest_ctx is NULL\n");
+	return 0;
+    }
 
+    fprintf(stderr, "digest_cleanup: FD=%d, Session=%d\n", cfd, digest_ctx->sess.ses);
     if (ioctl(cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
+        fprintf(stderr, "digest_cleanup: error deinitialising /dev/crypto session: sess.ses=%d\n", digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
@@ -513,8 +528,10 @@ static void prepare_digest_methods(void)
          */
         sess.mac = digest_data[i].devcryptoid;
         if (ioctl(cfd, CIOCGSESSION, &sess) < 0
-            || ioctl(cfd, CIOCFSESSION, &sess.ses) < 0)
+            || ioctl(cfd, CIOCFSESSION, &sess.ses) < 0) {
+            fprintf(stderr, "prepare_digest_methods() not adding digest: %d\n", sess.mac);
             continue;
+        }
 
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
                                                        NID_undef)) == NULL
