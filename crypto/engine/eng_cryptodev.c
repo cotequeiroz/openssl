@@ -1085,6 +1085,7 @@ static int cryptodev_digest_init(EVP_MD_CTX *ctx)
         printf("cryptodev_digest_init: Open session failed\n");
         return (0);
     }
+    fprintf(stderr, "cryptodev_digest_init: FD=%d, Session=%d\n", state->d_fd, sess->ses);
 
     return (1);
 }
@@ -1119,6 +1120,7 @@ static int cryptodev_digest_update(EVP_MD_CTX *ctx, const void *data,
         memcpy(state->mac_data + state->mac_len, data, count);
         state->mac_len += count;
 
+        fprintf(stderr, "cryptodev_digest_update realloc: FD=%d, Session=%d\n", state->d_fd, sess->ses);
         return (1);
     }
 
@@ -1134,6 +1136,7 @@ static int cryptodev_digest_update(EVP_MD_CTX *ctx, const void *data,
         printf("cryptodev_digest_update: digest failed\n");
         return (0);
     }
+    fprintf(stderr, "cryptodev_digest_update CCIOCCRYPT: FD=%d, Session=%d\n", state->d_fd, sess->ses);
     return (1);
 }
 
@@ -1162,6 +1165,7 @@ static int cryptodev_digest_final(EVP_MD_CTX *ctx, unsigned char *md)
             return (0);
         }
 
+        fprintf(stderr, "cryptodev_digest_final: FD= %d, Session=%d\n", state->d_fd, sess->ses);
         return 1;
     }
 
@@ -1188,6 +1192,7 @@ static int cryptodev_digest_cleanup(EVP_MD_CTX *ctx)
     state->mac_data = NULL;
     state->mac_len = 0;
 
+    printf("cryptodev_digest_cleanup: FD=%d, Session=%d\n", state->d_fd, sess->ses);
     if (ioctl(state->d_fd, CIOCFSESSION, &sess->ses) < 0) {
         printf("cryptodev_digest_cleanup: failed to close session\n");
         ret = 0;
@@ -1240,6 +1245,7 @@ static int cryptodev_digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
             dstate->mac_len = fstate->mac_len;
         }
     }
+    printf("cryptodev_digest_copy: FD=%d->%d, Session=%d\n", fstate->d_fd, dstate->d_fd, sess->ses);
 
     return 1;
 }
