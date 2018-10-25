@@ -348,7 +348,7 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
 struct digest_ctx {
     int cfd;
     struct session_op sess;
-    int init;
+//    int init;
 };
 
 static const struct digest_data_st {
@@ -413,22 +413,23 @@ static int digest_init(EVP_MD_CTX *ctx)
     const struct digest_data_st *digest_d =
         get_digest_data(EVP_MD_CTX_type(ctx));
 
-    if (digest_ctx->init == 0
-        && (digest_ctx->cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
+    fprintf(stderr, "Entering digest_init\n");
+    if ((digest_ctx->cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
+        fprintf(stderr, "digest_init: error opening /dev/crypto\n");
         SYSerr(SYS_F_OPEN, errno);
         return 0;
     }
 
-    digest_ctx->init = 1;
-
     memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
     digest_ctx->sess.mac = digest_d->devcryptoid;
     if (ioctl(digest_ctx->cfd, CIOCGSESSION, &digest_ctx->sess) < 0) {
+        fprintf(stderr, "digest_init: error initializing /dev/crypto session\n");
         SYSerr(SYS_F_IOCTL, errno);
         close(digest_ctx->cfd);
         return 0;
     }
 
+    fprintf(stderr, "Returning from digest_init - Session=%d\n", &digest_ctx->sess.ses);
     return 1;
 }
 
@@ -452,14 +453,17 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
+    fprintf(stderr, "Entering digest_update\n");
     if (count == 0)
         return 1;
 
     if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) < 0) {
+        fprintf(stderr, "digest_update: error calling CIOCCRYPT - Session=%d\n", &digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
+    fprintf(stderr, "Returning from digest_update - Session=%d\n", &digest_ctx->sess.ses);
     return 1;
 }
 
@@ -468,15 +472,14 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
+    fprintf(stderr, "Entering digest_final\n");
     if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
-    if (ioctl(digest_ctx->cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
+        fprintf(stderr, "digest_final: error calling CIOCCRYPT - Session=\n", &digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
+    fprintf(stderr, "Returning from digest_final - Session=%d\n", &digest_ctx->sess.ses);
     return 1;
 }
 
@@ -485,11 +488,26 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
+    fprintf(stderr, "Entering digest_cleanup\n");
+    if (digest_ctx == NULL) {
+        fprintf(stderr, "digest_cleanup: digest_ctx is NULL\n");
+	return 0;
+    }
+
+    fprintf(stderr, "digest_cleanup: deinitialising Session=%d\n", &digest_ctx->sess.ses);
+    if (ioctl(digest_ctx->cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
+        fprintf(stderr, "digest_cleanup: error deinitialising /dev/crypto session: sess.ses=%d\n", &digest_ctx->sess.ses);
+        SYSerr(SYS_F_IOCTL, errno);
+        return 0;
+    }
+
     if (close(digest_ctx->cfd) < 0) {
+        fprintf(stderr, "digest_cleanup: error closing /dev/crypto\n");
         SYSerr(SYS_F_CLOSE, errno);
         return 0;
     }
 
+    fprintf(stderr, "Returning from digest_cleanup\n");
     return 1;
 }
 
@@ -522,9 +540,10 @@ static void prepare_digest_methods()
          */
         sess.mac = digest_data[i].devcryptoid;
         if (ioctl(cfd, CIOCGSESSION, &sess) < 0
-            || ioctl(cfd, CIOCFSESSION, &sess.ses) < 0)
+            || ioctl(cfd, CIOCFSESSION, &sess.ses) < 0) {
+            fprintf(stderr, "prepare_digest_methods() not adding digest: %d\n", sess.mac);
             continue;
-
+        }
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
                                                        NID_undef)) == NULL
             || !EVP_MD_meth_set_result_size(known_digest_methods[i],
