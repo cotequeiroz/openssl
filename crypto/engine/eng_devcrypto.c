@@ -429,7 +429,7 @@ static int digest_init(EVP_MD_CTX *ctx)
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_init - Session=%d\n", &digest_ctx->sess.ses);
+    fprintf(stderr, "Returning from digest_init digest %d - FD=%d Session=%d\n", digest_d->devcryptoid, digest_ctx->cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -458,12 +458,12 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
         return 1;
 
     if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) < 0) {
-        fprintf(stderr, "digest_update: error calling CIOCCRYPT - Session=%d\n", &digest_ctx->sess.ses);
+        fprintf(stderr, "digest_update: error calling CIOCCRYPT - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_update - Session=%d\n", &digest_ctx->sess.ses);
+    fprintf(stderr, "Returning from digest_update - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -474,12 +474,12 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
 
     fprintf(stderr, "Entering digest_final\n");
     if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
-        fprintf(stderr, "digest_final: error calling CIOCCRYPT - Session=\n", &digest_ctx->sess.ses);
+        fprintf(stderr, "digest_final: error calling CIOCCRYPT - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_final - Session=%d\n", &digest_ctx->sess.ses);
+    fprintf(stderr, "Returning from digest_update - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -494,15 +494,15 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
 	return 0;
     }
 
-    fprintf(stderr, "digest_cleanup: deinitialising Session=%d\n", &digest_ctx->sess.ses);
+    fprintf(stderr, "digest_cleanup: deinitialising: FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
     if (ioctl(digest_ctx->cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
-        fprintf(stderr, "digest_cleanup: error deinitialising /dev/crypto session: sess.ses=%d\n", &digest_ctx->sess.ses);
+        fprintf(stderr, "digest_cleanup: error deinitialising /dev/crypto session: sess.ses=%d\n", digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
     if (close(digest_ctx->cfd) < 0) {
-        fprintf(stderr, "digest_cleanup: error closing /dev/crypto\n");
+        fprintf(stderr, "digest_cleanup: error closing /dev/crypto - FD=%d\n", digest_ctx->cfd);
         SYSerr(SYS_F_CLOSE, errno);
         return 0;
     }
