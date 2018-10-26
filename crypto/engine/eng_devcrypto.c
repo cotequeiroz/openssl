@@ -413,7 +413,6 @@ static int digest_init(EVP_MD_CTX *ctx)
     const struct digest_data_st *digest_d =
         get_digest_data(EVP_MD_CTX_type(ctx));
 
-    fprintf(stderr, "Entering digest_init\n");
     if ((digest_ctx->cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
         fprintf(stderr, "digest_init: error opening /dev/crypto\n");
         SYSerr(SYS_F_OPEN, errno);
@@ -429,7 +428,7 @@ static int digest_init(EVP_MD_CTX *ctx)
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_init digest %d - FD=%d Session=%d\n", digest_d->devcryptoid, digest_ctx->cfd, digest_ctx->sess.ses);
+    fprintf(stderr, "digest_init: digest=%d, FD=%d, Session=%d\n", digest_d->devcryptoid, digest_ctx->cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -453,7 +452,6 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    fprintf(stderr, "Entering digest_update\n");
     if (count == 0)
         return 1;
 
@@ -463,7 +461,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_update - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
+    fprintf(stderr, "digest_update: FD=%d, Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -472,14 +470,13 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    fprintf(stderr, "Entering digest_final\n");
     if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
         fprintf(stderr, "digest_final: error calling CIOCCRYPT - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_update - FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
+    fprintf(stderr, "digest_final: FD=%d, Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
     return 1;
 }
 
@@ -488,13 +485,12 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    fprintf(stderr, "Entering digest_cleanup\n");
     if (digest_ctx == NULL) {
         fprintf(stderr, "digest_cleanup: digest_ctx is NULL\n");
 	return 0;
     }
 
-    fprintf(stderr, "digest_cleanup: deinitialising: FD=%d Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
+    fprintf(stderr, "digest_cleanup: FD=%d, Session=%d\n", digest_ctx->cfd, digest_ctx->sess.ses);
     if (ioctl(digest_ctx->cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
         fprintf(stderr, "digest_cleanup: error deinitialising /dev/crypto session: sess.ses=%d\n", digest_ctx->sess.ses);
         SYSerr(SYS_F_IOCTL, errno);
@@ -507,7 +503,6 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
         return 0;
     }
 
-    fprintf(stderr, "Returning from digest_cleanup\n");
     return 1;
 }
 
