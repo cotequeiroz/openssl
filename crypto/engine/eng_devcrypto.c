@@ -482,7 +482,7 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
 
 static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
 {
-    /* There isn't much for us to copy, the |to| nees to be initialized */
+    /* There isn't much for us to copy, but |to| needs to be initialized */
     return digest_init(to);
 }
 
