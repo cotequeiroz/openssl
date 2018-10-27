@@ -480,6 +480,12 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     return 1;
 }
 
+static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
+{
+    /* There isn't much for us to copy, the |to| nees to be initialized */
+    return digest_init(to);
+}
+
 static int digest_cleanup(EVP_MD_CTX *ctx)
 {
     struct digest_ctx *digest_ctx =
@@ -532,6 +538,7 @@ static void prepare_digest_methods()
             || !EVP_MD_meth_set_init(known_digest_methods[i], digest_init)
             || !EVP_MD_meth_set_update(known_digest_methods[i], digest_update)
             || !EVP_MD_meth_set_final(known_digest_methods[i], digest_final)
+            || !EVP_MD_meth_set_copy(known_digest_methods[i], digest_copy)
             || !EVP_MD_meth_set_cleanup(known_digest_methods[i], digest_cleanup)
             || !EVP_MD_meth_set_app_datasize(known_digest_methods[i],
                                              sizeof(struct digest_ctx))) {
