@@ -329,11 +329,11 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
 
 /*
  * We only support digests if the cryptodev implementation supports multiple
- * data updates.  Otherwise, we would be forced to maintain a cache, which is
- * perilous if there's a lot of data coming in (if someone wants to checksum
- * an OpenSSL tarball, for example).
+ * data updates and session copying.  Otherwise, we would be forced to maintain
+ * a cache, which is perilous if there's a lot of data coming in (if someone
+ * wants to checksum an OpenSSL tarball, for example).
  */
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#if defined(CIOCCPHASH) && defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
 
 /******************************************************************************
  *
@@ -480,6 +480,28 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     return 1;
 }
 
+static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
+{
+    struct digest_ctx *digest_from =
+        (struct digest_ctx *)EVP_MD_CTX_md_data(from);
+    struct cphash_op cphash;
+
+    if (digest_from->init != 1) {
+        fprintf(stderr, "FOO!  %d\n", digest_from->init);
+        SYSerr(SYS_F_IOCTL, EINVAL);
+        return 0;
+    }
+
+    if (!digest_init(to)) {
+        SYSerr(SYS_F_IOCTL, errno);
+        return 0;
+    }
+
+    cphash.src_ses = from->sess.ses;
+    cphash.dst_ses = to->sess.ses;
+    return ioctl(to->cfd, CIOCCPHASH, &cphash);
+}
+
 static int digest_cleanup(EVP_MD_CTX *ctx)
 {
     struct digest_ctx *digest_ctx =
@@ -532,6 +554,7 @@ static void prepare_digest_methods()
             || !EVP_MD_meth_set_init(known_digest_methods[i], digest_init)
             || !EVP_MD_meth_set_update(known_digest_methods[i], digest_update)
             || !EVP_MD_meth_set_final(known_digest_methods[i], digest_final)
+            || !EVP_MD_meth_set_copy(known_digest_methods[i], digest_copy)
             || !EVP_MD_meth_set_cleanup(known_digest_methods[i], digest_cleanup)
             || !EVP_MD_meth_set_app_datasize(known_digest_methods[i],
                                              sizeof(struct digest_ctx))) {
