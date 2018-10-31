@@ -484,6 +484,8 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
 {
     struct digest_ctx *digest_from =
         (struct digest_ctx *)EVP_MD_CTX_md_data(from);
+    struct digest_ctx *digest_to =
+        (struct digest_ctx *)EVP_MD_CTX_md_data(to);
     struct cphash_op cphash;
 
     if (digest_from->init != 1) {
@@ -497,8 +499,8 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         return 0;
     }
 
-    cphash.src_ses = from->sess.ses;
-    cphash.dst_ses = to->sess.ses;
+    cphash.src_ses = digest_from->sess.ses;
+    cphash.dst_ses = digest_to->sess.ses;
     return ioctl(to->cfd, CIOCCPHASH, &cphash);
 }
 
