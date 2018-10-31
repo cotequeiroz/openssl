@@ -334,6 +334,7 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
  * wants to checksum an OpenSSL tarball, for example).
  */
 #if defined(CIOCCPHASH) && defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#define IMPLEMENT_DIGEST
 
 /******************************************************************************
  *
@@ -623,7 +624,7 @@ static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
 static int devcrypto_unload(ENGINE *e)
 {
     destroy_all_cipher_methods();
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#ifdef IMPLEMENT_DIGEST
     destroy_all_digest_methods();
 #endif
     return 1;
@@ -643,7 +644,7 @@ void engine_load_devcrypto_int()
     }
 
     prepare_cipher_methods();
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#ifdef IMPLEMENT_DIGEST
     prepare_digest_methods();
 #endif
 
@@ -689,7 +690,7 @@ void engine_load_devcrypto_int()
 # endif
 #endif
         || !ENGINE_set_ciphers(e, devcrypto_ciphers)
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#ifdef IMPLEMENT_DIGEST
         || !ENGINE_set_digests(e, devcrypto_digests)
 #endif
         ) {
