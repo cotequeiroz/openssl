@@ -464,8 +464,8 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         (struct digest_ctx *)EVP_MD_CTX_md_data(to);
 
     if (from_ctx == NULL || to_ctx == NULL) {
-        fprintf(stderr, "digest_copy: %s is NULL.\n", 
-	    from_ctx ? "from_ctx" : "to_ctx"); 
+        fprintf(stderr, "digest_copy: %s is NULL.\n",
+	    from_ctx ? "to_ctx" : "from_ctx");
         return 0;
     }
 
