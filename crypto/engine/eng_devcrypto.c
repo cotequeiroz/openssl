@@ -28,6 +28,8 @@
 # define CHECK_BSD_STYLE_MACROS
 #endif
 
+static int cfd=-1;
+
 /******************************************************************************
  *
  * Ciphers
@@ -39,7 +41,6 @@
  *****/
 
 struct cipher_ctx {
-    int cfd;
     struct session_op sess;
 
     /* to pass from init to do_cipher */
@@ -135,19 +136,13 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
 
-    if ((cipher_ctx->cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
-        SYSerr(SYS_F_OPEN, errno);
-        return 0;
-    }
-
     memset(&cipher_ctx->sess, 0, sizeof(cipher_ctx->sess));
     cipher_ctx->sess.cipher = cipher_d->devcryptoid;
     cipher_ctx->sess.keylen = cipher_d->keylen;
     cipher_ctx->sess.key = (void *)key;
     cipher_ctx->op = enc ? COP_ENCRYPT : COP_DECRYPT;
-    if (ioctl(cipher_ctx->cfd, CIOCGSESSION, &cipher_ctx->sess) < 0) {
+    if (ioctl(cfd, CIOCGSESSION, &cipher_ctx->sess) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
-        close(cipher_ctx->cfd);
         return 0;
     }
 
@@ -186,7 +181,7 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     cryp.flags = COP_FLAG_WRITE_IV;
 #endif
 
-    if (ioctl(cipher_ctx->cfd, CIOCCRYPT, &cryp) < 0) {
+    if (ioctl(cfd, CIOCCRYPT, &cryp) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
@@ -212,12 +207,8 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
 
-    if (ioctl(cipher_ctx->cfd, CIOCFSESSION, &cipher_ctx->sess.ses) < 0) {
+    if (ioctl(cfd, CIOCFSESSION, &cipher_ctx->sess.ses) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
-    if (close(cipher_ctx->cfd) < 0) {
-        SYSerr(SYS_F_CLOSE, errno);
         return 0;
     }
 
@@ -237,10 +228,6 @@ static void prepare_cipher_methods(void)
 {
     size_t i;
     struct session_op sess;
-    int cfd;
-
-    if ((cfd = open("/dev/crypto", O_RDWR, 0)) < 0)
-        return;
 
     memset(&sess, 0, sizeof(sess));
     sess.key = (void *)"01234567890123456789012345678901234567890123456789";
@@ -281,8 +268,6 @@ static void prepare_cipher_methods(void)
                 cipher_data[i].nid;
         }
     }
-
-    close(cfd);
 }
 
 static const EVP_CIPHER *get_cipher_method(int nid)
@@ -346,9 +331,7 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
  *****/
 
 struct digest_ctx {
-    int cfd;
     struct session_op sess;
-    int init;
 };
 
 static const struct digest_data_st {
@@ -413,19 +396,10 @@ static int digest_init(EVP_MD_CTX *ctx)
     const struct digest_data_st *digest_d =
         get_digest_data(EVP_MD_CTX_type(ctx));
 
-    if (digest_ctx->init == 0
-        && (digest_ctx->cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
-        SYSerr(SYS_F_OPEN, errno);
-        return 0;
-    }
-
-    digest_ctx->init = 1;
-
     memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
     digest_ctx->sess.mac = digest_d->devcryptoid;
-    if (ioctl(digest_ctx->cfd, CIOCGSESSION, &digest_ctx->sess) < 0) {
+    if (ioctl(cfd, CIOCGSESSION, &digest_ctx->sess) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
-        close(digest_ctx->cfd);
         return 0;
     }
 
@@ -444,7 +418,7 @@ static int digest_op(struct digest_ctx *ctx, const void *src, size_t srclen,
     cryp.dst = NULL;
     cryp.mac = res;
     cryp.flags = flags;
-    return ioctl(ctx->cfd, CIOCCRYPT, &cryp);
+    return ioctl(cfd, CIOCCRYPT, &cryp);
 }
 
 static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
@@ -472,10 +446,6 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
-    if (ioctl(digest_ctx->cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
 
     return 1;
 }
@@ -486,12 +456,6 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         (struct digest_ctx *)EVP_MD_CTX_md_data(from);
     struct cphash_op cphash;
 
-    if (digest_from->init != 1) {
-        fprintf(stderr, "FOO!  %d\n", digest_from->init);
-        SYSerr(SYS_F_IOCTL, EINVAL);
-        return 0;
-    }
-
     if (!digest_init(to)) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
@@ -499,7 +463,7 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
 
     cphash.src_ses = from->sess.ses;
     cphash.dst_ses = to->sess.ses;
-    return ioctl(to->cfd, CIOCCPHASH, &cphash);
+    return ioctl(cfd, CIOCCPHASH, &cphash);
 }
 
 static int digest_cleanup(EVP_MD_CTX *ctx)
@@ -507,8 +471,11 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    if (close(digest_ctx->cfd) < 0) {
-        SYSerr(SYS_F_CLOSE, errno);
+    if (digest_ctx == NULL)
+        return 0;
+
+    if (ioctl(cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
+        SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
 
@@ -528,10 +495,6 @@ static void prepare_digest_methods(void)
 {
     size_t i;
     struct session_op sess;
-    int cfd;
-
-    if ((cfd = open("/dev/crypto", O_RDWR, 0)) < 0)
-        return;
 
     memset(&sess, 0, sizeof(sess));
 
@@ -564,8 +527,6 @@ static void prepare_digest_methods(void)
             known_digest_nids[known_digest_nids_amount++] = digest_data[i].nid;
         }
     }
-
-    close(cfd);
 }
 
 static const EVP_MD *get_digest_method(int nid)
@@ -621,9 +582,13 @@ static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
 static int devcrypto_unload(ENGINE *e)
 {
     destroy_all_cipher_methods();
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#ifdef CIOCCPHASH
     destroy_all_digest_methods();
 #endif
+    if (cfd != -1) {
+        close(cfd);
+        cfd = -1;
+    }
     return 1;
 }
 /*
@@ -634,14 +599,14 @@ void engine_load_devcrypto_int()
 {
     ENGINE *e = NULL;
 
-    if (access("/dev/crypto", R_OK | W_OK) < 0) {
+    if ((cfd = open("/dev/crypto", O_RDWR, 0)) == -1) {
         fprintf(stderr,
-                "/dev/crypto not present, not enabling devcrypto engine\n");
+                "Error opening /dev/crypto, not enabling devcrypto engine\n");
         return;
     }
 
     prepare_cipher_methods();
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#ifdef CIOCCPHASH
     prepare_digest_methods();
 #endif
 
@@ -687,7 +652,7 @@ void engine_load_devcrypto_int()
 # endif
 #endif
         || !ENGINE_set_ciphers(e, devcrypto_ciphers)
-#if defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#ifdef CIOCCPHASH
         || !ENGINE_set_digests(e, devcrypto_digests)
 #endif
         ) {
