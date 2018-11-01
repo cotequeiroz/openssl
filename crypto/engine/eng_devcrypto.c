@@ -486,7 +486,11 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
 
     cphash.src_ses = digest_from->sess.ses;
     cphash.dst_ses = digest_to->sess.ses;
-    return ioctl(cfd, CIOCCPHASH, &cphash);
+    if (ioctl(cfd, CIOCCPHASH, &cphash) < 0) {
+        SYSerr(SYS_F_IOCTL, errno);
+        return 0;
+    }
+    return ;
 }
 
 static int digest_cleanup(EVP_MD_CTX *ctx)
