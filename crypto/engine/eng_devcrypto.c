@@ -490,7 +490,7 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
-    return ;
+    return 1;
 }
 
 static int digest_cleanup(EVP_MD_CTX *ctx)
