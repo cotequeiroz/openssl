@@ -220,6 +220,34 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
     return 1;
 }
 
+static int devcrypto_test_cipher(size_t cipher_data_index)
+{
+    struct session_op sess;
+#ifdef CIOCGSESSINFO
+    struct session_info_op siop;
+#endif
+    int ret=0;
+
+    memset(&sess, 0, sizeof(sess));
+    sess.key = (void *)"01234567890123456789012345678901234567890123456789";
+    sess.cipher = cipher_data[cipher_data_index].devcryptoid;
+    sess.keylen = cipher_data[cipher_data_index].keylen;
+    if (ioctl(cfd, CIOCGSESSION, &sess) < 0)
+        return 0;
+#ifdef CIOCGSESSINFO
+    siop.ses = sess.ses;
+    /* Don't use software (non-accelerated) drivers,
+     * but only if we can get that info */
+    if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0
+        || (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
+        ret = 1;
+#else
+    ret = 1;
+#endif
+    ioctl(cfd, CIOCFSESSION, &sess.ses);
+    return ret;
+}
+
 /*
  * Keep a table of known nids and associated methods.
  * Note that known_cipher_nids[] isn't necessarily indexed the same way as
@@ -241,13 +269,9 @@ static void prepare_cipher_methods(void)
          i < OSSL_NELEM(cipher_data); i++) {
 
         /*
-         * Check that the algo is really availably by trying to open and close
-         * a session.
+         * Check that the algo is usable
          */
-        sess.cipher = cipher_data[i].devcryptoid;
-        sess.keylen = cipher_data[i].keylen;
-        if (ioctl(cfd, CIOCGSESSION, &sess) < 0
-            || ioctl(cfd, CIOCFSESSION, &sess.ses) < 0)
+        if (!devcrypto_test_cipher(i))
             continue;
 
         if ((known_cipher_methods[i] =
@@ -392,8 +416,8 @@ static const struct digest_data_st *get_digest_data(int nid)
 }
 
 /*
- * Following are the six necessary functions to map OpenSSL functionality
- * with cryptodev.
+ * Following are the five necessary functions to map OpenSSL functionality
+ * with cryptodev: init, update, final, cleanup, and copy.
  */
 
 static int digest_init(EVP_MD_CTX *ctx)
@@ -508,6 +532,43 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     return 1;
 }
 
+static int devcrypto_test_digest(size_t digest_data_index)
+{
+    struct session_op sess1, sess2;
+#ifdef CIOCGSESSINFO
+    struct session_info_op siop;
+#endif
+    struct cphash_op cphash;
+    int ret=0;
+
+    memset(&sess1, 0, sizeof(sess1));
+    memset(&sess2, 0, sizeof(sess2));
+    sess1.mac = digest_data[digest_data_index].devcryptoid;
+    if (ioctl(cfd, CIOCGSESSION, &sess1) < 0)
+        return 0;
+#ifdef CIOCGSESSINFO
+    siop.ses = sess1.ses;
+    /* Don't use software (non-accelerated) drivers,
+     * but only if we can get that info */
+    if (ioctl(cfd, CIOCGSESSINFO, &siop) >= 0
+        && !(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
+        goto finish;
+#endif
+    /* Make sure the driver is capable of hash state copy */
+    sess2.mac = sess1.mac;
+    if (ioctl(cfd, CIOCGSESSION, &sess2) < 0)
+        goto finish;
+    cphash.src_ses = sess1.ses;
+    cphash.dst_ses = sess2.ses;
+    if (ioctl(cfd, CIOCCPHASH, &cphash) >= 0)
+        ret = 1;
+finish:
+    ioctl(cfd, CIOCFSESSION, &sess1.ses);
+    if (sess2.ses == 0)
+        ioctl(cfd, CIOCFSESSION, &sess2.ses);
+    return ret;
+}
+
 /*
  * Keep a table of known nids and associated methods.
  * Note that known_digest_nids[] isn't necessarily indexed the same way as
@@ -520,20 +581,14 @@ static EVP_MD *known_digest_methods[OSSL_NELEM(digest_data)] = { NULL, };
 static void prepare_digest_methods(void)
 {
     size_t i;
-    struct session_op sess;
-
-    memset(&sess, 0, sizeof(sess));
 
     for (i = 0, known_digest_nids_amount = 0; i < OSSL_NELEM(digest_data);
          i++) {
 
         /*
-         * Check that the algo is really availably by trying to open and close
-         * a session.
+         * Check that the algo is usable
          */
-        sess.mac = digest_data[i].devcryptoid;
-        if (ioctl(cfd, CIOCGSESSION, &sess) < 0
-            || ioctl(cfd, CIOCFSESSION, &sess.ses) < 0)
+        if (!devcrypto_test_digest(i))
             continue;
 
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
