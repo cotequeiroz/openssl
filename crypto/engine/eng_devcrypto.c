@@ -184,6 +184,7 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
 
+    fprintf(stderr, "cipher_init: ctx=%08lx, cipher=%s, enc=%d\n", (long) ctx, OBJ_nid2sn(EVP_CIPHER_CTX_nid(ctx)), enc);
     memset(&cipher_ctx->sess, 0, sizeof(cipher_ctx->sess));
     cipher_ctx->sess.cipher = cipher_d->devcryptoid;
     cipher_ctx->sess.keylen = cipher_d->keylen;
@@ -207,6 +208,7 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     unsigned char saved_iv[EVP_MAX_IV_LENGTH];
 #endif
 
+    fprintf(stderr, "cipher_do_cipher: ctx=%08lx, cipher=%s, len=%ld\n", (long) ctx, OBJ_nid2sn(EVP_CIPHER_CTX_nid(ctx)), inl);
     memset(&cryp, 0, sizeof(cryp));
     cryp.ses = cipher_ctx->sess.ses;
     cryp.len = inl;
@@ -255,10 +257,14 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
     EVP_CIPHER_CTX *to_ctx = (EVP_CIPHER_CTX *)p2;
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    int res, enc;
+    const unsigned char *iv=EVP_CIPHER_CTX_iv(ctx);
 # ifdef HAVE_SYSLOG_R
     struct syslog_data sd = SYSLOG_DATA_INIT;
 # endif
 
+    fprintf(stderr, "cipher_ctrl: CTX=%08lx, type=%d, p1=%d, p2=%08lx, "
+            "cipher_ctx=%08lx\n", (long)ctx, type, p1, (long)p2, (long)cipher_ctx);
 # ifdef HAVE_SYSLOG_R
     syslog_r(LOG_ERR, &sd, "cipher_ctrl: CTX=%08lx, type=%d, p1=%d, p2=%08lx, "
              "cipher_ctx=%08lx", (long)ctx, type, p1, (long)p2, (long)cipher_ctx);
@@ -268,9 +274,13 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
 # endif
     if (type == EVP_CTRL_COPY) {
         /* when copying the context, a new session needs to be initialized */
-        return (cipher_ctx == NULL)
-            || cipher_init(to_ctx, cipher_ctx->sess.key, EVP_CIPHER_CTX_iv(ctx),
-                           (cipher_ctx->op == COP_ENCRYPT));
+	enc = (cipher_ctx->op == COP_ENCRYPT);
+        res = (cipher_ctx == NULL)
+              || cipher_init(to_ctx, cipher_ctx->sess.key, iv, enc);
+        if (!res)
+	    fprintf(stderr, "cipher_ctrl: cipher_init(ctx=%08lx, key=%s, iv=%s,"
+	            " op=%d) failed!\n", (long)ctx, cipher_ctx->sess.key, iv, enc);
+	return res;
     }
 
     return -1;
@@ -281,6 +291,7 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
 
+    fprintf(stderr, "cipher_cleanup: ctx=%08lx\n", (long) ctx);
     if (ioctl(cfd, CIOCFSESSION, &cipher_ctx->sess.ses) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
@@ -321,6 +332,7 @@ static void prepare_cipher_methods(void)
 #ifdef CIOCGSESSINFO
     struct session_info_op siop;
 #endif
+    const char *name;
 
     memset(&cipher_driver_info, 0, sizeof(cipher_driver_info));
 
@@ -331,6 +343,8 @@ static void prepare_cipher_methods(void)
          i < OSSL_NELEM(cipher_data); i++) {
 
         selected_ciphers[i] = 1;
+        name = OBJ_nid2sn(cipher_data[i].nid);
+
         /*
          * Check that the cipher is usable
          */
@@ -338,6 +352,7 @@ static void prepare_cipher_methods(void)
         sess.keylen = cipher_data[i].keylen;
         if (ioctl(cfd, CIOCGSESSION, &sess) < 0) {
             cipher_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
+            fprintf( stderr, "Skipping cipher %s: CIOCGSESSION errno=%d.\n", name, errno);
             continue;
         }
 
@@ -367,15 +382,19 @@ static void prepare_cipher_methods(void)
 #ifdef CIOCGSESSINFO
             siop.ses = sess.ses;
             if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
+                fprintf(stderr, "Cipher %s: accelerated status unknown, CIOCGSESSINFO errno=%d.\n",
+                        name, errno);
                 cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
             } else {
                 cipher_driver_info[i].driver_name =
                     OPENSSL_strndup(siop.cipher_info.cra_driver_name,
                                     CRYPTODEV_MAX_ALG_NAME);
-                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
+                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)) {
+                    fprintf(stderr, "Cipher %s: not accelerated.\n", name);
                     cipher_driver_info[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
-                else
+                } else {
                     cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATED;
+                }
             }
 #endif /* CIOCGSESSINFO */
         }
@@ -462,12 +481,14 @@ static int cryptodev_select_cipher_cb(const char *str, int len, void *usr)
     if (usr == NULL || (name = OPENSSL_strndup(str, len)) == NULL)
         return 0;
     EVP = EVP_get_cipherbyname(name);
-    if (EVP == NULL)
+    if (EVP == NULL) {
         fprintf(stderr, "devcrypto: unknown cipher %s\n", name);
-    else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1)
+    } else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1) {
+        fprintf(stderr, "Enabling cipher %s.\n", name);
         cipher_list[i] = 1;
-    else
+    } else {
         fprintf(stderr, "devcrypto: cipher %s not available\n", name);
+    }
     OPENSSL_free(name);
     return 1;
 }
@@ -603,6 +624,7 @@ static int digest_init(EVP_MD_CTX *ctx)
     const struct digest_data_st *digest_d =
         get_digest_data(EVP_MD_CTX_type(ctx));
 
+    fprintf(stderr, "digest_init: digest=%s\n", OBJ_nid2sn(EVP_MD_CTX_type(ctx)));
     digest_ctx->init_called = 1;
 
     memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
@@ -635,6 +657,8 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
+    fprintf(stderr, "in digest_update flags=%04x\n",
+        EVP_MD_CTX_test_flags(ctx,0xffff));
     if (count == 0)
         return 1;
 
@@ -642,6 +666,8 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
         return 0;
 
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
+        fprintf(stderr, "in digest_update flags=%04x, ONESHOT=1\n",
+            EVP_MD_CTX_test_flags(ctx,0xffff));
         if (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0)
             return 1;
     } else if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) >= 0) {
@@ -660,7 +686,12 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     if (md == NULL || digest_ctx == NULL)
         return 0;
 
+    fprintf(stderr, "in digest_final, flags=%04x\n",
+        EVP_MD_CTX_test_flags(ctx,0xffff));
+
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
+        fprintf(stderr, "in digest_final, flags=%04x, ONESHOT=1\n",
+            EVP_MD_CTX_test_flags(ctx,0xffff));
         memcpy(md, digest_ctx->digest_res, EVP_MD_CTX_size(ctx));
     } else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
@@ -751,6 +782,7 @@ static void prepare_digest_methods(void)
     struct session_info_op siop;
 #endif
     struct cphash_op cphash;
+    const char *name;
 
     memset(&digest_driver_info, 0, sizeof(digest_driver_info));
 
@@ -761,6 +793,7 @@ static void prepare_digest_methods(void)
          i++) {
 
         selected_digests[i] = 1;
+        name = OBJ_nid2sn(digest_data[i].nid);
 
         /*
          * Check that the digest is usable
@@ -769,6 +802,7 @@ static void prepare_digest_methods(void)
         sess2.ses = 0;
         if (ioctl(cfd, CIOCGSESSION, &sess1) < 0) {
             digest_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
+            fprintf( stderr, "Skipping digest %s: CIOCGSESSION errno=%d.\n", name, errno);
             goto finish;
         }
 
@@ -776,27 +810,33 @@ static void prepare_digest_methods(void)
         /* gather hardware acceleration info from the driver */
         siop.ses = sess1.ses;
         if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
+            fprintf(stderr, "Digest %s: accelerated status unknown, CIOCGSESSINFO errno=%d.\n",
+                    name, errno);
             digest_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
         } else {
             digest_driver_info[i].driver_name =
                 OPENSSL_strndup(siop.hash_info.cra_driver_name,
                                 CRYPTODEV_MAX_ALG_NAME);
-            if (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)
+            if (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY) {
                 digest_driver_info[i].accelerated = DEVCRYPTO_ACCELERATED;
-            else
+            } else {
+                fprintf( stderr, "Digest %s: not accelerated.\n", name);
                 digest_driver_info[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
+            }
         }
 #endif
 
         /* digest must be capable of hash state copy */
         sess2.mac = sess1.mac;
         if (ioctl(cfd, CIOCGSESSION, &sess2) < 0) {
+            fprintf( stderr, "Skipping digest %s: CIOCGSESSION errno=%d.\n", name, errno);
             digest_driver_info[i].status = DEVCRYPTO_STATUS_FAILURE;
             goto finish;
         }
         cphash.src_ses = sess1.ses;
         cphash.dst_ses = sess2.ses;
         if (ioctl(cfd, CIOCCPHASH, &cphash) < 0) {
+            fprintf( stderr, "Skipping digest %s: CIOCCPHASH errno=%d.\n", name, errno);
             digest_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCCPHASH;
             goto finish;
         }
@@ -891,12 +931,14 @@ static int cryptodev_select_digest_cb(const char *str, int len, void *usr)
     if (usr == NULL || (name = OPENSSL_strndup(str, len)) == NULL)
         return 0;
     EVP = EVP_get_digestbyname(name);
-    if (EVP == NULL)
+    if (EVP == NULL) {
         fprintf(stderr, "devcrypto: unknown digest %s\n", name);
-    else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1)
+    } else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1) {
+        fprintf(stderr, "Enabling digest %s.\n", name);
         digest_list[i] = 1;
-    else
+    } else {
         fprintf(stderr, "devcrypto: digest %s not available\n", name);
+    }
     OPENSSL_free(name);
     return 1;
 }
