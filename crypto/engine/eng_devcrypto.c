@@ -201,9 +201,10 @@ static int cryptodev_enable_cipher_cb(const char *str, int len, void *unused)
     EVP = EVP_get_cipherbyname(name);
     if (EVP == NULL)
         fprintf(stderr, "devcrypto: unknown cipher %s\n", name);
-    else if ((i = get_cipher_data_index(EVP_CIPHER_nid(EVP))) >= 0)
+    else if ((i = get_cipher_data_index(EVP_CIPHER_nid(EVP))) >= 0) {
+        fprintf(stderr, "Enabling cipher %s.\n", name);
         cipher_data[i].enabled = 1;
-    else
+    } else
         fprintf(stderr, "devcrypto: cipher %s not available\n", name);
     OPENSSL_free(name);
     return 1;
@@ -222,6 +223,7 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
 
+    fprintf(stderr, "cipher_init: ctx=%08lx, cipher=%s, enc=%d\n", (long) ctx, OBJ_nid2sn(EVP_CIPHER_CTX_nid(ctx)), enc);
     memset(&cipher_ctx->sess, 0, sizeof(cipher_ctx->sess));
     cipher_ctx->sess.cipher = cipher_d->devcryptoid;
     cipher_ctx->sess.keylen = cipher_d->keylen;
@@ -245,6 +247,7 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     unsigned char saved_iv[EVP_MAX_IV_LENGTH];
 #endif
 
+    fprintf(stderr, "cipher_do_cipher: ctx=%08lx, cipher=%s, len=%ld\n", (long) ctx, OBJ_nid2sn(EVP_CIPHER_CTX_nid(ctx)), inl);
     memset(&cryp, 0, sizeof(cryp));
     cryp.ses = cipher_ctx->sess.ses;
     cryp.len = inl;
@@ -293,6 +296,7 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
 
+    fprintf(stderr, "cipher_cleanup: ctx=%08lx\n", (long) ctx);
     if (ioctl(cfd, CIOCFSESSION, &cipher_ctx->sess.ses) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
@@ -362,6 +366,7 @@ static void prepare_cipher_methods(void)
 #ifdef CIOCGSESSINFO
     struct session_info_op siop;
 #endif
+    const char *name;
 
     memset(&sess, 0, sizeof(sess));
     sess.key = (void *)"01234567890123456789012345678901234567890123456789";
@@ -369,12 +374,15 @@ static void prepare_cipher_methods(void)
     for (i = 0, known_cipher_nids_amount = 0;
          i < OSSL_NELEM(cipher_data); i++) {
 
+        name = OBJ_nid2sn(cipher_data[i].nid);
+
         /*
          * Check that the cipher is usable
          */
         sess.cipher = cipher_data[i].devcryptoid;
         sess.keylen = cipher_data[i].keylen;
         if (ioctl(cfd, CIOCGSESSION, &sess) < 0) {
+            fprintf( stderr, "Skipping cipher %s: CIOCGSESSION errno=%d.\n", name, errno);
             cipher_data[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
             continue;
         }
@@ -402,15 +410,18 @@ static void prepare_cipher_methods(void)
             cipher_data[i].status = DEVCRYPTO_STATUS_USABLE;
 #ifdef CIOCGSESSINFO
             siop.ses = sess.ses;
-            if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0)
+            if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
+                fprintf(stderr, "Cipher %s: accelerated status unknown, CIOCGSESSINFO errno=%d.\n",
+                        name, errno);
                 cipher_data[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-            else {
+            } else {
                 cipher_data[i].driver_name =
                     OPENSSL_strndup(siop.cipher_info.cra_driver_name,
                                     CRYPTODEV_MAX_ALG_NAME);
-                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
+                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)) {
+                    fprintf(stderr, "Cipher %s: not accelerated.\n", name);
                     cipher_data[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
-                else
+                } else
                     cipher_data[i].accelerated = DEVCRYPTO_ACCELERATED;
             }
 #endif /* CIOCGSESSINFO */
@@ -586,9 +597,10 @@ static int cryptodev_enable_digest_cb(const char *str, int len, void *unused)
     EVP = EVP_get_digestbyname (name);
     if (EVP == NULL)
         fprintf(stderr, "devcrypto: unknown digest %s\n", name);
-    else if ((i = get_digest_data_index(EVP_MD_type(EVP))) != -1)
+    else if ((i = get_digest_data_index(EVP_MD_type(EVP))) != -1) {
+        fprintf(stderr, "Enabling digest %s.\n", name);
         digest_data[i].enabled = 1;
-    else
+    } else
         fprintf(stderr, "devcrypto: digest %s not available\n", name);
     OPENSSL_free (name);
     return 1;
@@ -606,6 +618,7 @@ static int digest_init(EVP_MD_CTX *ctx)
     const struct digest_data_st *digest_d =
         get_digest_data(EVP_MD_CTX_type(ctx));
 
+    fprintf(stderr, "digest_init: digest=%s\n", OBJ_nid2sn(EVP_MD_CTX_type(ctx)));
     digest_ctx->init = 1;
 
     memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
@@ -638,9 +651,13 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
+    fprintf(stderr, "in digest_update flags=%04x\n",
+        EVP_MD_CTX_test_flags(ctx,0xffff));
     if (count == 0)
         return 1;
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
+        fprintf(stderr, "in digest_update flags=%04x, ONESHOT=1\n",
+            EVP_MD_CTX_test_flags(ctx,0xffff));
         if (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0)
             return 1;
     } else if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) >= 0)
@@ -655,9 +672,13 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+    fprintf(stderr, "in digest_final, flags=%04x\n",
+        EVP_MD_CTX_test_flags(ctx,0xffff));
+    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
+        fprintf(stderr, "in digest_final, flags=%04x, ONESHOT=1\n",
+            EVP_MD_CTX_test_flags(ctx,0xffff));
         memcpy(md, digest_ctx->digest_res, EVP_MD_CTX_size(ctx));
-    else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
+    } else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
@@ -781,6 +802,7 @@ static void prepare_digest_methods(void)
     struct session_info_op siop;
 #endif
     struct cphash_op cphash;
+    const char *name;
 
     memset(&sess1, 0, sizeof(sess1));
     memset(&sess2, 0, sizeof(sess2));
@@ -788,12 +810,15 @@ static void prepare_digest_methods(void)
     for (i = 0, known_digest_nids_amount = 0;
          i < OSSL_NELEM(digest_data); i++) {
 
+        name = OBJ_nid2sn(digest_data[i].nid);
+
         /*
          * Check that the digest is usable
          */
         sess1.mac = digest_data[i].devcryptoid;
         sess2.ses = 0;
         if (ioctl(cfd, CIOCGSESSION, &sess1) < 0) {
+            fprintf( stderr, "Skipping digest %s: CIOCGSESSION errno=%d.\n", name, errno);
             digest_data[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
             goto finish;
         }
@@ -801,28 +826,34 @@ static void prepare_digest_methods(void)
 #ifdef CIOCGSESSINFO
         /* gather hardware acceleration info from the driver */
         siop.ses = sess1.ses;
-        if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0)
+        if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
+            fprintf(stderr, "Digest %s: accelerated status unknown, CIOCGSESSINFO errno=%d.\n",
+                    name, errno);
             digest_data[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-        else {
+        } else {
             digest_data[i].driver_name =
                 OPENSSL_strndup(siop.hash_info.cra_driver_name,
                                 CRYPTODEV_MAX_ALG_NAME);
 	    if (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)
                 digest_data[i].accelerated = DEVCRYPTO_ACCELERATED;
-            else
+            else {
+                fprintf( stderr, "Digest %s: not accelerated.\n", name);
                 digest_data[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
+	    }
 	}
 #endif
 
         /* digest must be capable of hash state copy */
         sess2.mac = sess1.mac;
         if (ioctl(cfd, CIOCGSESSION, &sess2) < 0) {
+            fprintf( stderr, "Skipping digest %s: CIOCGSESSION errno=%d.\n", name, errno);
             digest_data[i].status = DEVCRYPTO_STATUS_FAILURE;
             goto finish;
         }
         cphash.src_ses = sess1.ses;
         cphash.dst_ses = sess2.ses;
         if (ioctl(cfd, CIOCCPHASH, &cphash) < 0) {
+            fprintf( stderr, "Skipping digest %s: CIOCCPHASH errno=%d.\n", name, errno);
             digest_data[i].status = DEVCRYPTO_STATUS_NO_CIOCCPHASH;
             goto finish;
         }
