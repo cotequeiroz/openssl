@@ -392,7 +392,7 @@ static const struct digest_data_st *get_digest_data(int nid)
 }
 
 /*
- * Following are the four necessary functions to map OpenSSL functionality
+ * Following are the six necessary functions to map OpenSSL functionality
  * with cryptodev.
  */
 
@@ -460,10 +460,6 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
-    if (ioctl(cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
 
     return 1;
 }
@@ -500,6 +496,15 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
 
 static int digest_cleanup(EVP_MD_CTX *ctx)
 {
+    struct digest_ctx *digest_ctx =
+        (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
+
+    if (digest_ctx == NULL)
+        return 1;
+    if (ioctl(cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
+        SYSerr(SYS_F_IOCTL, errno);
+        return 0;
+    }
     return 1;
 }
 
