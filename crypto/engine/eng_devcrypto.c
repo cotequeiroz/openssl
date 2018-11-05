@@ -514,6 +514,7 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
 struct digest_ctx {
     struct session_op sess;
     int init;
+    unsigned char digest_res[HASH_MAX_LEN];
 };
 
 static struct digest_data_st {
@@ -670,13 +671,14 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
 
     if (count == 0)
         return 1;
+    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
+        if (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0)
+            return 1;
+    } else if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) >= 0)
+        return 1;
 
-    if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
-
-    return 1;
+    SYSerr(SYS_F_IOCTL, errno);
+    return 0;
 }
 
 static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
@@ -684,7 +686,9 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
 
-    if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
+    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+        memcpy(md, digest_ctx->digest_res, EVP_MD_CTX_size(ctx));
+    else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
