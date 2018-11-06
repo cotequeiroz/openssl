@@ -29,6 +29,8 @@
 # define CHECK_BSD_STYLE_MACROS
 #endif
 
+#define engine_devcrypto_id "devcrypto"
+
 /*
  * cipher/digest status & acceleration definitions
  */
@@ -1060,41 +1062,52 @@ static int devcrypto_unload(ENGINE *e)
 
     return 1;
 }
+
 /*
- * This engine is always built into libcrypto, so it doesn't offer any
- * ability to be dynamically loadable.
+ * Opens /dev/crypto
  */
-void engine_load_devcrypto_int()
+static int open_devcrypto(void)
 {
-    ENGINE *e = NULL;
+    if (cfd >= 0)
+        return 1;
 
     if ((cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
         fprintf(stderr, "Could not open /dev/crypto: %s\n", strerror(errno));
-        return;
+        return 0;
     }
 
-    if ((e = ENGINE_new()) == NULL
-        || !ENGINE_set_destroy_function(e, devcrypto_unload)) {
-        ENGINE_free(e);
-        /*
-         * We know that devcrypto_unload() won't be called when one of the
-         * above two calls have failed, so we close cfd explicitly here to
-         * avoid leaking resources.
-         */
-        close(cfd);
-        return;
+    return 1;
+}
+
+static int close_devcrypto(void)
+{
+    if (cfd < 0)
+        return 1;
+    if ((close(cfd)) == 0) {
+        fprintf(stderr "Error closing /dev/crypto: %s\n", strerror(errno));
+        return 0;
     }
+    return 1;
+}
+
+static int bind_devcrypto(ENGINE *e) {
+
+    if (!ENGINE_set_id(e, devcrypto_id)
+        || !ENGINE_set_name(e, "/dev/crypto engine")
+        || !ENGINE_set_destroy_function(e, devcrypto_unload)
+        || !ENGINE_set_cmd_defns(e, devcrypto_cmds)
+        || !ENGINE_set_ctrl_function(e, devcrypto_ctrl))
+        return 0;
 
     prepare_cipher_methods();
 #ifdef IMPLEMENT_DIGEST
     prepare_digest_methods();
 #endif
 
-    if (!ENGINE_set_id(e, "devcrypto")
-        || !ENGINE_set_name(e, "/dev/crypto engine")
-        || !ENGINE_set_cmd_defns(e, devcrypto_cmds)
-        || !ENGINE_set_ctrl_function(e, devcrypto_ctrl)
-
+    return (ENGINE_set_ciphers(e, devcrypto_ciphers)
+#ifdef IMPLEMENT_DIGEST
+        && ENGINE_set_digests(e, devcrypto_digests)
+#endif
 /*
  * Asymmetric ciphers aren't well supported with /dev/crypto.  Among the BSD
  * implementations, it seems to only exist in FreeBSD, and regarding the
@@ -1117,23 +1130,36 @@ void engine_load_devcrypto_int()
  */
 #if 0
 # ifndef OPENSSL_NO_RSA
-        || !ENGINE_set_RSA(e, devcrypto_rsa)
+        && ENGINE_set_RSA(e, devcrypto_rsa)
 # endif
 # ifndef OPENSSL_NO_DSA
-        || !ENGINE_set_DSA(e, devcrypto_dsa)
+        && ENGINE_set_DSA(e, devcrypto_dsa)
 # endif
 # ifndef OPENSSL_NO_DH
-        || !ENGINE_set_DH(e, devcrypto_dh)
+        && ENGINE_set_DH(e, devcrypto_dh)
 # endif
 # ifndef OPENSSL_NO_EC
-        || !ENGINE_set_EC(e, devcrypto_ec)
+        && ENGINE_set_EC(e, devcrypto_ec)
 # endif
 #endif
-        || !ENGINE_set_ciphers(e, devcrypto_ciphers)
-#ifdef IMPLEMENT_DIGEST
-        || !ENGINE_set_digests(e, devcrypto_digests)
-#endif
-        ) {
+        );
+}
+
+#ifndef OPENSSL_DEVCRYPTO_DYNAMIC
+/*
+ * In case this engine is built into libcrypto, then it doesn't offer any
+ * ability to be dynamically loadable.
+ */
+void engine_load_devcrypto_int()
+{
+    ENGINE *e = NULL;
+
+    if (!open_devcrypto())
+        return;
+
+    if ((e = ENGINE_new()) == NULL
+        || !bind_devcrypto(e)) {
+        close_devcrypto();
         ENGINE_free(e);
         return;
     }
@@ -1142,3 +1168,43 @@ void engine_load_devcrypto_int()
     ENGINE_free(e);          /* Loose our local reference */
     ERR_clear_error();
 }
+
+#else
+
+static int bind_helper(ENGINE *e, const char *id)
+{
+    if ((id && (strcmp(id, engine_devcrypto_id) != 0))
+        || !open_devcrypto())
+        return 0;
+    if (!bind_devcrypto(e)) {
+        close_devcrypto();
+        return 0;
+    }
+    return 1;
+}
+
+IMPLEMENT_DYNAMIC_CHECK_FN()
+    IMPLEMENT_DYNAMIC_BIND_FN(bind_helper)
+
+static ENGINE *engine_devcrypto(void)
+{
+    ENGINE *ret = ENGINE_new();
+    if (ret == NULL)
+        return NULL;
+    if (!bind_devcrypto(ret)) {
+        ENGINE_free(ret)
+        return NULL;
+    }
+    return ret;
+}
+
+void ENGINE_load_devcrypto(void)
+{
+    ENGINE *e = engine_devcrypto();
+    if (!e)
+        return;
+    ENGINE_add(e);
+    ENGINE_free(e);
+    ERR_clear_error();
+}
+#endif
