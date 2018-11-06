@@ -7,5 +7,7 @@ SOURCE[../../libcrypto]=\
         eng_openssl.c eng_cnf.c eng_dyn.c \
         eng_rdrand.c
 IF[{- !$disabled{devcryptoeng} -}]
-  SOURCE[../../libcrypto]=eng_devcrypto.c
+  IF[{- $disabled{"devcryptoeng-dynamic"} -}]
+    SOURCE[../../libcrypto]=eng_devcrypto.c
+  ENDIF
 ENDIF

@@ -39,6 +39,16 @@ IF[{- !$disabled{"engine"} -}]
         GENERATE[afalg.ld]=../util/engines.num
       ENDIF
     ENDIF
+    IF[{- !$disabled{"devcryptoeng-dynamic"} -}]
+      ENGINES=devcrypto
+      SOURCE[devcrypto]=../crypto/engine/eng_devcrypto.c
+      DEPEND[devcrypto]=../libcrypto
+      INCLUDE[devcrypto]=../include .. ../crypto/include
+      IF[{- defined $target{shared_defflag} -}]
+        SHARED_SOURCE[devcrypto]=devcrypto.ld
+        GENERATE[devcrypto.ld]=../util/engines.num
+      ENDIF
+    ENDIF
 
     ENGINES_NO_INST=ossltest dasync
     SOURCE[dasync]=e_dasync.c
