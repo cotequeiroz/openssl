@@ -307,7 +307,7 @@ DEFINE_RUN_ONCE_STATIC(ossl_init_engine_openssl)
     engine_load_openssl_int();
     return 1;
 }
-# ifndef OPENSSL_NO_DEVCRYPTOENG
+# if !defined(OPENSSL_NO_DEVCRYPTOENG) && !defined(OPENSSL_DEVCRYPTO_DYNAMIC)
 static CRYPTO_ONCE engine_devcrypto = CRYPTO_ONCE_STATIC_INIT;
 DEFINE_RUN_ONCE_STATIC(ossl_init_engine_devcrypto)
 {
@@ -670,7 +670,8 @@ int OPENSSL_init_crypto(uint64_t opts, const OPENSSL_INIT_SETTINGS *settings)
     if ((opts & OPENSSL_INIT_ENGINE_OPENSSL)
             && !RUN_ONCE(&engine_openssl, ossl_init_engine_openssl))
         return 0;
-# if !defined(OPENSSL_NO_HW) && !defined(OPENSSL_NO_DEVCRYPTOENG)
+# if !defined(OPENSSL_NO_HW) && !defined(OPENSSL_NO_DEVCRYPTOENG) \
+     && !defined(OPENSSL_DEVCRYPTO_DYNAMIC)
     if ((opts & OPENSSL_INIT_ENGINE_CRYPTODEV)
             && !RUN_ONCE(&engine_devcrypto, ossl_init_engine_devcrypto))
         return 0;
