@@ -151,22 +151,35 @@ static struct cipher_data_st {
 #endif
 };
 
-static int get_cipher_data_index(int nid)
+static size_t find_cipher_data_index(int nid)
 {
     size_t i;
 
     for (i = 0; i < OSSL_NELEM(cipher_data); i++)
         if (nid == cipher_data[i].nid)
-            return (int) i;
+            return i;
+    return (size_t)-1;
+}
+
+static size_t get_cipher_data_index(int nid)
+{
+    size_t i = find_cipher_data_index(nid);
+
+    if (i != (size_t)-1)
+        return i;
+
+    /*
+     * Code further down must make sure that only NIDs in the table above
+     * are used.  If any other NID reaches this function, there's a grave
+     * coding error further down.
+     */
+    assert("Code that never should be reached" == NULL);
     return -1;
 }
 
 static const struct cipher_data_st *get_cipher_data(int nid)
 {
-    int i = get_cipher_data_index(nid);
-    if (i < 0)
-        return NULL;
-    return &cipher_data[i];
+    return &cipher_data[get_cipher_data_index(nid)];
 }
 
 static void cryptodev_disable_all_ciphers(void)
@@ -190,14 +203,16 @@ static int cryptodev_enable_cipher_cb(const char *str, int len, void *unused)
     (void) unused;
     char *name;
     const EVP_CIPHER *EVP;
-    int i;
+    size_t i;
 
-    if (len == 0 || (name = OPENSSL_strndup(str, len)) == NULL)
+    if (len == 0)
+        return 1;
+    if ((name = OPENSSL_strndup(str, len)) == NULL)
         return 0;
     EVP = EVP_get_cipherbyname(name);
     if (EVP == NULL)
         fprintf(stderr, "devcrypto: unknown cipher %s\n", name);
-    else if ((i = get_cipher_data_index(EVP_CIPHER_nid(EVP))) >= 0)
+    else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1)
         cipher_data[i].enabled = 1;
     else
         fprintf(stderr, "devcrypto: cipher %s not available\n", name);
@@ -494,14 +509,29 @@ static struct digest_data_st {
 #endif
 };
 
-static size_t get_digest_data_index(int nid)
+static size_t find_digest_data_index(int nid)
 {
     size_t i;
 
     for (i = 0; i < OSSL_NELEM(digest_data); i++)
         if (nid == digest_data[i].nid)
             return i;
+    return (size_t)-1;
+}
 
+static size_t get_digest_data_index(int nid)
+{
+    size_t i = find_digest_data_index(nid);
+
+    if (i != (size_t)-1)
+        return i;
+
+    /*
+     * Code further down must make sure that only NIDs in the table above
+     * are used.  If any other NID reaches this function, there's a grave
+     * coding error further down.
+     */
+    assert("Code that never should be reached" == NULL);
     return -1;
 }
 
@@ -531,18 +561,20 @@ static int cryptodev_enable_digest_cb(const char *str, int len, void *unused)
     (void) unused;
     char *name;
     const EVP_MD *EVP;
-    int i;
+    size_t i;
 
-    if (len == 0 || (name = OPENSSL_strndup(str, len)) == NULL)
+    if (len == 0)
+        return 1;
+    if ((name = OPENSSL_strndup(str, len)) == NULL)
         return 0;
-    EVP = EVP_get_digestbyname (name);
+    EVP = EVP_get_digestbyname(name);
     if (EVP == NULL)
         fprintf(stderr, "devcrypto: unknown digest %s\n", name);
-    else if ((i = get_digest_data_index(EVP_MD_type(EVP))) != -1)
+    else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1)
         digest_data[i].enabled = 1;
     else
         fprintf(stderr, "devcrypto: digest %s not available\n", name);
-    OPENSSL_free (name);
+    OPENSSL_free(name);
     return 1;
 }
 
@@ -759,7 +791,7 @@ static void prepare_digest_methods(void)
         digest_data[i].status = DEVCRYPTO_STATUS_USABLE;
 finish:
         ioctl(cfd, CIOCFSESSION, &sess1.ses);
-        if (sess2.ses == 0)
+        if (sess2.ses != 0)
             ioctl(cfd, CIOCFSESSION, &sess2.ses);
         if (devcrypto_test_digest(i))
             known_digest_nids[known_digest_nids_amount++] = digest_data[i].nid;
@@ -850,12 +882,12 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     switch(cmd) {
     case DEVCRYPTO_CMD_USE_SOFTDRIVERS:
         switch(i) {
-            case DEVCRYPTO_REQUIRE_ACCELERATED:
-            case DEVCRYPTO_USE_SOFTWARE:
-            case DEVCRYPTO_REJECT_SOFTWARE:
-                break;
-            default:
-                fprintf(stderr, "devcrypto: invalid value (%ld) for USE_SOFTDRIVERS\n", i);
+        case DEVCRYPTO_REQUIRE_ACCELERATED:
+        case DEVCRYPTO_USE_SOFTWARE:
+        case DEVCRYPTO_REJECT_SOFTWARE:
+            break;
+        default:
+            fprintf(stderr, "devcrypto: invalid value (%ld) for USE_SOFTDRIVERS\n", i);
             return 0;
         }
         if (use_softdrivers == i)
