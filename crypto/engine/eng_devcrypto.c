@@ -32,17 +32,19 @@
 /*
  * cipher/digest status & acceleration definitions
  */
-#define DEVCRYPTO_STATUS_USABLE          1 /* algo can be used */
-#define DEVCRYPTO_STATUS_UNKNOWN         0 /* not tested yet */
-#define DEVCRYPTO_STATUS_UNUSABLE       -1 /* session open failed */
+#define DEVCRYPTO_STATUS_USABLE           1 /* algo can be used */
+#define DEVCRYPTO_STATUS_UNKNOWN          0 /* not tested yet */
+#define DEVCRYPTO_STATUS_NO_CIOCGSESSION -1 /* session open failed */
+#define DEVCRYPTO_STATUS_NO_CIOCCPHASH   -2 /* hash state copy not supported */
+#define DEVCRYPTO_STATUS_FAILURE         -3 /* unusable for other reason */
 
-#define DEVCRYPTO_ACCELERATED            1 /* hardware accelerated */
-#define DEVCRYPTO_ACCELERATION_UNKNOWN   0 /* acceleration support unkown */
-#define DEVCRYPTO_NOT_ACCELERATED       -1 /* software implemented */
+#define DEVCRYPTO_ACCELERATED             1 /* hardware accelerated */
+#define DEVCRYPTO_ACCELERATION_UNKNOWN    0 /* acceleration support unkown */
+#define DEVCRYPTO_NOT_ACCELERATED        -1 /* software implemented */
 
-#define DEVCRYPTO_REQUIRE_ACCELERATED    0 /* require confirmation of acceleration */
-#define DEVCRYPTO_USE_SOFTWARE           1 /* allow software drivers */
-#define DEVCRYPTO_REJECT_SOFTWARE        2 /* only disallow confirmed software drivers */
+#define DEVCRYPTO_REQUIRE_ACCELERATED     0 /* require confirmation of acceleration */
+#define DEVCRYPTO_USE_SOFTWARE            1 /* allow software drivers */
+#define DEVCRYPTO_REJECT_SOFTWARE         2 /* only disallow confirmed software drivers */
 
 #define STR_(S) #S
 #define STR(S)  STR_(S)
@@ -83,71 +85,72 @@ static struct cipher_data_st {
     int status;
     int accelerated;
     int enabled;
+    char *driver_name;
 } cipher_data[] = {
 #ifndef OPENSSL_NO_DES
-    { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, CRYPTO_DES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+    { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, CRYPTO_DES_CBC, 
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, CRYPTO_3DES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #ifndef OPENSSL_NO_BF
     { NID_bf_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_BLF_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #ifndef OPENSSL_NO_CAST
     { NID_cast5_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_CAST_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
     { NID_aes_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #ifndef OPENSSL_NO_RC4
     { NID_rc4, 1, 16, 0, EVP_CIPH_STREAM_CIPHER, CRYPTO_ARC4,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR)
     { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if 0                            /* Not yet supported */
     { NID_aes_128_xts, 16, 128 / 8 * 2, 16, EVP_CIPH_XTS_MODE, CRYPTO_AES_XTS,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_256_xts, 16, 256 / 8 * 2, 16, EVP_CIPH_XTS_MODE, CRYPTO_AES_XTS,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_ECB)
     { NID_aes_128_ecb, 16, 128 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_192_ecb, 16, 192 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_256_ecb, 16, 256 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if 0                            /* Not yet supported */
     { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_aes_256_gcm, 16, 256 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #ifndef OPENSSL_NO_CAMELLIA
     { NID_camellia_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE,
       CRYPTO_CAMELLIA_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_camellia_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE,
       CRYPTO_CAMELLIA_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
     { NID_camellia_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE,
       CRYPTO_CAMELLIA_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 };
 
@@ -312,6 +315,40 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
     return 1;
 }
 
+static void dump_cipher_info(void)
+{
+    size_t i;
+    const char *name;
+
+    fprintf (stderr, "Information about ciphers supported by the /dev/crypto"
+             " engine:\n");
+#ifndef CIOCGSESSINFO
+    fprintf(stderr, "CIOCGSESSINFO (session info call) unavailable\n");
+#endif
+    for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
+        name = OBJ_nid2sn(cipher_data[i].nid);
+        fprintf (stderr, "Cipher %s, NID=%d, /dev/crypto info: id=%d, ",
+                 name ? name : "unknown", cipher_data[i].nid,
+                 cipher_data[i].devcryptoid);
+        if (cipher_data[i].status == DEVCRYPTO_STATUS_NO_CIOCGSESSION ) {
+            fprintf (stderr, "CIOCGSESSION (session open call) failed\n");
+            continue;
+        }
+        fprintf (stderr, "driver=%s ", cipher_data[i].driver_name ?
+                 cipher_data[i].driver_name : "unknown");
+        if (cipher_data[i].accelerated == DEVCRYPTO_ACCELERATED)
+            fprintf(stderr, "(hw accelerated)");
+        else if (cipher_data[i].accelerated == DEVCRYPTO_NOT_ACCELERATED)
+            fprintf(stderr, "(software)");
+        else
+            fprintf(stderr, "(acceleration status unknown)");
+        if (cipher_data[i].status == DEVCRYPTO_STATUS_FAILURE)
+            fprintf (stderr, ". Cipher setup failed");
+        fprintf(stderr, "\n");
+    }
+    fprintf(stderr, "\n");
+}
+
 /*
  * Keep a table of known nids and associated methods.
  * Note that known_cipher_nids[] isn't necessarily indexed the same way as
@@ -352,7 +389,7 @@ static void prepare_cipher_methods(void)
         sess.cipher = cipher_data[i].devcryptoid;
         sess.keylen = cipher_data[i].keylen;
         if (ioctl(cfd, CIOCGSESSION, &sess) < 0) {
-            cipher_data[i].status = DEVCRYPTO_STATUS_UNUSABLE;
+            cipher_data[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
             continue;
         }
 
@@ -372,7 +409,7 @@ static void prepare_cipher_methods(void)
                                             cipher_cleanup)
             || !EVP_CIPHER_meth_set_impl_ctx_size(known_cipher_methods[i],
                                                   sizeof(struct cipher_ctx))) {
-            cipher_data[i].status = DEVCRYPTO_STATUS_UNUSABLE;
+            cipher_data[i].status = DEVCRYPTO_STATUS_FAILURE;
             EVP_CIPHER_meth_free(known_cipher_methods[i]);
             known_cipher_methods[i] = NULL;
         } else {
@@ -381,10 +418,15 @@ static void prepare_cipher_methods(void)
             siop.ses = sess.ses;
             if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0)
                 cipher_data[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-            else if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
-                cipher_data[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
-            else
-                cipher_data[i].accelerated = DEVCRYPTO_ACCELERATED;
+            else {
+                cipher_data[i].driver_name =
+                    OPENSSL_strndup(siop.cipher_info.cra_driver_name,
+                                    CRYPTODEV_MAX_ALG_NAME);
+                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
+                    cipher_data[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
+                else
+                    cipher_data[i].accelerated = DEVCRYPTO_ACCELERATED;
+            }
 #endif /* CIOCGSESSINFO */
         }
         ioctl(cfd, CIOCFSESSION, &sess.ses);
@@ -432,8 +474,11 @@ static void destroy_all_cipher_methods(void)
 {
     size_t i;
 
-    for (i = 0; i < OSSL_NELEM(cipher_data); i++)
+    for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
         destroy_cipher_method(cipher_data[i].nid);
+        OPENSSL_free(cipher_data[i].driver_name);
+        cipher_data[i].driver_name = NULL;
+    }
 }
 
 static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
@@ -478,34 +523,35 @@ static struct digest_data_st {
     int status;
     int accelerated;
     int enabled;
+    char *driver_name;
 } digest_data[] = {
 #ifndef OPENSSL_NO_MD5
     { NID_md5, 16, CRYPTO_MD5, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
     { NID_sha1, 20, CRYPTO_SHA1, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #ifndef OPENSSL_NO_RMD160
 # if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_RIPEMD160)
     { NID_ripemd160, 20, CRYPTO_RIPEMD160, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 # endif
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_224)
     { NID_sha224, 224 / 8, CRYPTO_SHA2_224, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_256)
     { NID_sha256, 256 / 8, CRYPTO_SHA2_256, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_384)
     { NID_sha384, 384 / 8, CRYPTO_SHA2_384, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_512)
     { NID_sha512, 512 / 8, CRYPTO_SHA2_512, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN, 1, NULL },
 #endif
 };
 
@@ -688,6 +734,43 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     return 1;
 }
 
+static void dump_digest_info(void)
+{
+    size_t i;
+    const char *name;
+
+    fprintf (stderr, "Information about digests supported by the /dev/crypto"
+             " engine:\n");
+#ifndef CIOCGSESSINFO
+    fprintf(stderr, "CIOCGSESSINFO (session info call) unavailable\n");
+#endif
+
+    for (i = 0; i < OSSL_NELEM(digest_data); i++) {
+        name = OBJ_nid2sn(digest_data[i].nid);
+        fprintf (stderr, "Digest %s, NID=%d, /dev/crypto info: id=%d, driver=%s",
+                 name ? name : "unknown", digest_data[i].nid,
+                 digest_data[i].devcryptoid,
+                 digest_data[i].driver_name ? digest_data[i].driver_name : "unknown");
+        if (digest_data[i].status == DEVCRYPTO_STATUS_NO_CIOCGSESSION) {
+            fprintf (stderr, "CIOCGSESSION (session open call) failed\n");
+            continue;
+        }
+        if (digest_data[i].accelerated == DEVCRYPTO_ACCELERATED)
+            fprintf(stderr, " (hw accelerated)");
+        else if (digest_data[i].accelerated == DEVCRYPTO_NOT_ACCELERATED)
+            fprintf(stderr, " (software)");
+        else
+            fprintf(stderr, " (acceleration status unknown)");
+        if (cipher_data[i].status == DEVCRYPTO_STATUS_FAILURE)
+            fprintf (stderr, ". Cipher setup failed\n");
+        else if (digest_data[i].status == DEVCRYPTO_STATUS_NO_CIOCCPHASH)
+            fprintf(stderr, ", CIOCCPHASH failed\n");
+        else
+            fprintf(stderr, ", CIOCCPHASH capable\n");
+    }
+    fprintf(stderr, "\n");
+}
+
 /*
  * Keep a table of known nids and associated methods.
  * Note that known_digest_nids[] isn't necessarily indexed the same way as
@@ -738,7 +821,7 @@ static void prepare_digest_methods(void)
         sess1.mac = digest_data[i].devcryptoid;
         sess2.ses = 0;
         if (ioctl(cfd, CIOCGSESSION, &sess1) < 0) {
-            digest_data[i].status = DEVCRYPTO_STATUS_UNUSABLE;
+            digest_data[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
             goto finish;
         }
 
@@ -747,22 +830,27 @@ static void prepare_digest_methods(void)
         siop.ses = sess1.ses;
         if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0)
             digest_data[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-        else if (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)
-            digest_data[i].accelerated = DEVCRYPTO_ACCELERATED;
-        else
-            digest_data[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
+        else {
+            digest_data[i].driver_name =
+                OPENSSL_strndup(siop.hash_info.cra_driver_name,
+                                CRYPTODEV_MAX_ALG_NAME);
+            if (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)
+                digest_data[i].accelerated = DEVCRYPTO_ACCELERATED;
+            else
+                digest_data[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
+        }
 #endif
 
         /* digest must be capable of hash state copy */
         sess2.mac = sess1.mac;
         if (ioctl(cfd, CIOCGSESSION, &sess2) < 0) {
-            digest_data[i].status = DEVCRYPTO_STATUS_UNUSABLE;
+            digest_data[i].status = DEVCRYPTO_STATUS_FAILURE;
             goto finish;
         }
         cphash.src_ses = sess1.ses;
         cphash.dst_ses = sess2.ses;
         if (ioctl(cfd, CIOCCPHASH, &cphash) < 0) {
-            digest_data[i].status = DEVCRYPTO_STATUS_UNUSABLE;
+            digest_data[i].status = DEVCRYPTO_STATUS_NO_CIOCCPHASH;
             goto finish;
         }
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
@@ -776,7 +864,7 @@ static void prepare_digest_methods(void)
             || !EVP_MD_meth_set_cleanup(known_digest_methods[i], digest_cleanup)
             || !EVP_MD_meth_set_app_datasize(known_digest_methods[i],
                                              sizeof(struct digest_ctx))) {
-            digest_data[i].status = DEVCRYPTO_STATUS_UNUSABLE;
+            digest_data[i].status = DEVCRYPTO_STATUS_FAILURE;
             EVP_MD_meth_free(known_digest_methods[i]);
             known_digest_methods[i] = NULL;
             goto finish;
@@ -818,8 +906,11 @@ static void destroy_all_digest_methods(void)
 {
     size_t i;
 
-    for (i = 0; i < OSSL_NELEM(digest_data); i++)
+    for (i = 0; i < OSSL_NELEM(digest_data); i++) {
         destroy_digest_method(digest_data[i].nid);
+        OPENSSL_free(digest_data[i].driver_name);
+        digest_data[i].driver_name = NULL;
+    }
 }
 
 static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
@@ -866,6 +957,11 @@ static const ENGINE_CMD_DEFN devcrypto_cmds[] = {
     "either ALL, NONE, or a comma-separated list of digests to enable [default=ALL]",
     ENGINE_CMD_FLAG_STRING},
 #endif
+
+   {DEVCRYPTO_CMD_DUMP_INFO,
+    "DUMP_INFO",
+    "dump info about each algorithm to stderr; use 'openssl engine -pre DUMP_INFO devcrypto'",
+    ENGINE_CMD_FLAG_NO_INPUT},
 
    {0, NULL, NULL, 0}
 };
@@ -929,6 +1025,13 @@ reload_digests:
         rebuild_known_digest_nids();
         return 1;
 #endif /* IMPLEMENT_DIGEST */
+
+    case DEVCRYPTO_CMD_DUMP_INFO:
+        dump_cipher_info();
+#ifdef IMPLEMENT_DIGEST
+        dump_digest_info();
+#endif
+        return 1;
 
     default:
         break;
