@@ -41,6 +41,10 @@
      necessary to configure just to create a source distribution.
      [Richard Levitte]
 
+  *) Add option to build devcrypto egine as a dynamic engine.  Enable by
+     configuring with enable-devcryptoeng-dynamic.
+     [Eneas U de Queiroz]
+
   *) Recreate the OS390-Unix config target.  It no longer relies on a
      special script like it did for OpenSSL pre-1.1.0.
      [Richard Levitte]
