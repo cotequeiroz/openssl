@@ -82,72 +82,71 @@ static struct cipher_data_st {
     int devcryptoid;
     int status;
     int accelerated;
-    int enabled;
 } cipher_data[] = {
 #ifndef OPENSSL_NO_DES
     { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, CRYPTO_DES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, CRYPTO_3DES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #ifndef OPENSSL_NO_BF
     { NID_bf_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_BLF_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #ifndef OPENSSL_NO_CAST
     { NID_cast5_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_CAST_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
     { NID_aes_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #ifndef OPENSSL_NO_RC4
     { NID_rc4, 1, 16, 0, EVP_CIPH_STREAM_CIPHER, CRYPTO_ARC4,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR)
     { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if 0                            /* Not yet supported */
     { NID_aes_128_xts, 16, 128 / 8 * 2, 16, EVP_CIPH_XTS_MODE, CRYPTO_AES_XTS,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_256_xts, 16, 256 / 8 * 2, 16, EVP_CIPH_XTS_MODE, CRYPTO_AES_XTS,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_ECB)
     { NID_aes_128_ecb, 16, 128 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_192_ecb, 16, 192 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_256_ecb, 16, 256 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if 0                            /* Not yet supported */
     { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_aes_256_gcm, 16, 256 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #ifndef OPENSSL_NO_CAMELLIA
     { NID_camellia_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE,
       CRYPTO_CAMELLIA_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_camellia_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE,
       CRYPTO_CAMELLIA_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
     { NID_camellia_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE,
       CRYPTO_CAMELLIA_CBC,
-      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_STATUS_UNKNOWN, DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 };
 
@@ -180,44 +179,6 @@ static size_t get_cipher_data_index(int nid)
 static const struct cipher_data_st *get_cipher_data(int nid)
 {
     return &cipher_data[get_cipher_data_index(nid)];
-}
-
-static void cryptodev_disable_all_ciphers(void)
-{
-    size_t i;
-
-    for (i = 0; i < OSSL_NELEM(cipher_data); i++)
-        cipher_data[i].enabled = 0;
-}
-
-static void cryptodev_enable_all_ciphers(void)
-{
-    size_t i;
-
-    for (i = 0; i < OSSL_NELEM(cipher_data); i++)
-        cipher_data[i].enabled = 1;
-}
-
-static int cryptodev_enable_cipher_cb(const char *str, int len, void *unused)
-{
-    (void) unused;
-    char *name;
-    const EVP_CIPHER *EVP;
-    size_t i;
-
-    if (len == 0)
-        return 1;
-    if ((name = OPENSSL_strndup(str, len)) == NULL)
-        return 0;
-    EVP = EVP_get_cipherbyname(name);
-    if (EVP == NULL)
-        fprintf(stderr, "devcrypto: unknown cipher %s\n", name);
-    else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1)
-        cipher_data[i].enabled = 1;
-    else
-        fprintf(stderr, "devcrypto: cipher %s not available\n", name);
-    OPENSSL_free(name);
-    return 1;
 }
 
 /*
@@ -313,18 +274,19 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
 }
 
 /*
- * Keep a table of known nids and associated methods.
+ * Keep a table of known nids, associated methods and selected ciphers.
  * Note that known_cipher_nids[] isn't necessarily indexed the same way as
- * cipher_data[] above, which known_cipher_methods[] is.
+ * cipher_data[] above, which known_cipher_methods[], and selected_ciphers[] are.
  */
 static int known_cipher_nids[OSSL_NELEM(cipher_data)];
 static int known_cipher_nids_amount = -1; /* -1 indicates not yet initialised */
 static EVP_CIPHER *known_cipher_methods[OSSL_NELEM(cipher_data)] = { NULL, };
+static int selected_ciphers[OSSL_NELEM(cipher_data)];
 
 static int devcrypto_test_cipher(size_t cipher_data_index)
 {
     return (cipher_data[cipher_data_index].status == DEVCRYPTO_STATUS_USABLE
-            && cipher_data[cipher_data_index].enabled == 1
+            && selected_ciphers[cipher_data_index] == 1
             && (cipher_data[cipher_data_index].accelerated == DEVCRYPTO_ACCELERATED
                 || use_softdrivers == DEVCRYPTO_USE_SOFTWARE
                 || (cipher_data[cipher_data_index].accelerated
@@ -346,6 +308,7 @@ static void prepare_cipher_methods(void)
     for (i = 0, known_cipher_nids_amount = 0;
          i < OSSL_NELEM(cipher_data); i++) {
 
+        selected_ciphers[i] = 1;
         /*
          * Check that the cipher is usable
          */
@@ -447,6 +410,36 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
     return *cipher != NULL;
 }
 
+static void devcrypto_select_all_ciphers(int *cipher_list)
+{
+    size_t i;
+
+    for (i = 0; i < OSSL_NELEM(cipher_data); i++)
+        cipher_list[i] = 1;
+}
+
+static int cryptodev_select_cipher_cb(const char *str, int len, void *usr)
+{
+    int *cipher_list = (int *)usr;
+    char *name;
+    const EVP_CIPHER *EVP;
+    size_t i;
+
+    if (len == 0)
+        return 1;
+    if (usr == NULL || (name = OPENSSL_strndup(str, len)) == NULL)
+        return 0;
+    EVP = EVP_get_cipherbyname(name);
+    if (EVP == NULL)
+        fprintf(stderr, "devcrypto: unknown cipher %s\n", name);
+    else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1)
+        cipher_list[i] = 1;
+    else
+        fprintf(stderr, "devcrypto: cipher %s not available\n", name);
+    OPENSSL_free(name);
+    return 1;
+}
+
 /*
  * We only support digests if the cryptodev implementation supports multiple
  * data updates and session copying.  Otherwise, we would be forced to maintain
@@ -477,35 +470,34 @@ static struct digest_data_st {
     int devcryptoid;
     int status;
     int accelerated;
-    int enabled;
 } digest_data[] = {
 #ifndef OPENSSL_NO_MD5
     { NID_md5, 16, CRYPTO_MD5, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
     { NID_sha1, 20, CRYPTO_SHA1, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 #ifndef OPENSSL_NO_RMD160
 # if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_RIPEMD160)
     { NID_ripemd160, 20, CRYPTO_RIPEMD160, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 # endif
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_224)
     { NID_sha224, 224 / 8, CRYPTO_SHA2_224, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_256)
     { NID_sha256, 256 / 8, CRYPTO_SHA2_256, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_384)
     { NID_sha384, 384 / 8, CRYPTO_SHA2_384, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_512)
     { NID_sha512, 512 / 8, CRYPTO_SHA2_512, DEVCRYPTO_STATUS_UNKNOWN,
-      DEVCRYPTO_ACCELERATION_UNKNOWN, 1 },
+      DEVCRYPTO_ACCELERATION_UNKNOWN },
 #endif
 };
 
@@ -538,44 +530,6 @@ static size_t get_digest_data_index(int nid)
 static const struct digest_data_st *get_digest_data(int nid)
 {
     return &digest_data[get_digest_data_index(nid)];
-}
-
-static void cryptodev_disable_all_digests(void)
-{
-    size_t i;
-
-    for (i = 0; i < OSSL_NELEM(digest_data); i++)
-        digest_data[i].enabled = 0;
-}
-
-static void cryptodev_enable_all_digests(void)
-{
-    size_t i;
-
-    for (i = 0; i < OSSL_NELEM(digest_data); i++)
-        digest_data[i].enabled = 1;
-}
-
-static int cryptodev_enable_digest_cb(const char *str, int len, void *unused)
-{
-    (void) unused;
-    char *name;
-    const EVP_MD *EVP;
-    size_t i;
-
-    if (len == 0)
-        return 1;
-    if ((name = OPENSSL_strndup(str, len)) == NULL)
-        return 0;
-    EVP = EVP_get_digestbyname(name);
-    if (EVP == NULL)
-        fprintf(stderr, "devcrypto: unknown digest %s\n", name);
-    else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1)
-        digest_data[i].enabled = 1;
-    else
-        fprintf(stderr, "devcrypto: digest %s not available\n", name);
-    OPENSSL_free(name);
-    return 1;
 }
 
 /*
@@ -703,11 +657,12 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
 static int known_digest_nids[OSSL_NELEM(digest_data)];
 static int known_digest_nids_amount = -1; /* -1 indicates not yet initialised */
 static EVP_MD *known_digest_methods[OSSL_NELEM(digest_data)] = { NULL, };
+static int selected_digests[OSSL_NELEM(digest_data)];
 
 static int devcrypto_test_digest(size_t digest_data_index)
 {
     return (digest_data[digest_data_index].status == DEVCRYPTO_STATUS_USABLE
-            && digest_data[digest_data_index].enabled == 1
+            && selected_digests[digest_data_index] == 1
             && (digest_data[digest_data_index].accelerated == DEVCRYPTO_ACCELERATED
                 || use_softdrivers == DEVCRYPTO_USE_SOFTWARE
                 || (digest_data[digest_data_index].accelerated != DEVCRYPTO_NOT_ACCELERATED
@@ -738,6 +693,8 @@ static void prepare_digest_methods(void)
 
     for (i = 0, known_digest_nids_amount = 0; i < OSSL_NELEM(digest_data);
          i++) {
+
+        selected_digests[i] = 1;
 
         /*
          * Check that the digest is usable
@@ -840,6 +797,35 @@ static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
     return *digest != NULL;
 }
 
+static void devcrypto_select_all_digests(int *digest_list)
+{
+    size_t i;
+
+    for (i = 0; i < OSSL_NELEM(digest_data); i++)
+        digest_list[i] = 1;
+}
+
+static int cryptodev_select_digest_cb(const char *str, int len, void *usr)
+{
+    int *digest_list = (int *)usr;
+    char *name;
+    const EVP_MD *EVP;
+    size_t i;
+
+    if (len == 0)
+        return 1;
+    if (usr == NULL || (name = OPENSSL_strndup(str, len)) == NULL)
+        return 0;
+    EVP = EVP_get_digestbyname(name);
+    if (EVP == NULL)
+        fprintf(stderr, "devcrypto: unknown digest %s\n", name);
+    else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1)
+        digest_list[i] = 1;
+    else
+        fprintf(stderr, "devcrypto: digest %s not available\n", name);
+    OPENSSL_free(name);
+    return 1;
+}
 
 #endif
 
@@ -879,6 +865,7 @@ static const ENGINE_CMD_DEFN devcrypto_cmds[] = {
 
 static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
 {
+    int *new_list;
     switch(cmd) {
     case DEVCRYPTO_CMD_USE_SOFTDRIVERS:
         switch(i) {
@@ -902,18 +889,19 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     case DEVCRYPTO_CMD_CIPHERS:
         if (p == NULL)
             return 1;
-        if (strcasecmp((const char *)p, "ALL") == 0) {
-            cryptodev_enable_all_ciphers();
-            goto reload_ciphers;
+        if (strcasecmp((const char *)p, "ALL") == 0)
+            devcrypto_select_all_ciphers(selected_ciphers);
+        else if (strcasecmp((const char*)p, "NONE") == 0)
+            memset(selected_ciphers, 0, sizeof(selected_ciphers));
+        else {
+            new_list=OPENSSL_zalloc(sizeof(selected_ciphers));
+            if (!CONF_parse_list(p, ',', 1, cryptodev_select_cipher_cb, new_list)) {
+                OPENSSL_free(new_list);
+                return 0;
+            }
+            memcpy(selected_ciphers, new_list, sizeof(selected_ciphers));
+            OPENSSL_free(new_list);
         }
-        cryptodev_disable_all_ciphers();
-        if (strcasecmp((const char*)p, "NONE") == 0)
-            goto reload_ciphers;
-        else if (!CONF_parse_list(p, ',', 1, cryptodev_enable_cipher_cb, NULL)) {
-            cryptodev_enable_all_ciphers();
-            return 0;
-        }
-reload_ciphers:
         rebuild_known_cipher_nids();
         return 1;
 
@@ -921,18 +909,19 @@ reload_ciphers:
     case DEVCRYPTO_CMD_DIGESTS:
         if (p == NULL)
             return 1;
-        if (strcasecmp((const char *)p, "ALL") == 0) {
-            cryptodev_enable_all_digests();
-            goto reload_digests;
+        if (strcasecmp((const char *)p, "ALL") == 0)
+            devcrypto_select_all_digests(selected_digests);
+        else if (strcasecmp((const char*)p, "NONE") == 0)
+            memset(selected_digests, 0, sizeof(selected_digests));
+        else {
+            new_list=OPENSSL_zalloc(sizeof(selected_digests));
+            if (!CONF_parse_list(p, ',', 1, cryptodev_select_digest_cb, new_list)) {
+                OPENSSL_free(new_list);
+                return 0;
+            }
+            memcpy(selected_digests, new_list, sizeof(selected_digests));
+            OPENSSL_free(new_list);
         }
-        cryptodev_disable_all_digests();
-        if (strcasecmp((const char*)p, "NONE") == 0)
-            goto reload_digests;
-        else if (!CONF_parse_list(p, ',', 1, cryptodev_enable_digest_cb, NULL)) {
-            cryptodev_enable_all_digests();
-            return 0;
-        }
-reload_digests:
         rebuild_known_digest_nids();
         return 1;
 #endif /* IMPLEMENT_DIGEST */
