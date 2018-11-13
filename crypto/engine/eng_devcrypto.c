@@ -335,9 +335,9 @@ static void prepare_cipher_methods(void)
             cipher_driver_info[i].status = DEVCRYPTO_STATUS_USABLE;
 #ifdef CIOCGSESSINFO
             siop.ses = sess.ses;
-            if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0)
+            if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
                 cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-            else {
+            } else {
                 cipher_driver_info[i].driver_name =
                     OPENSSL_strndup(siop.cipher_info.cra_driver_name,
                                     CRYPTODEV_MAX_ALG_NAME);
@@ -610,8 +610,9 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
         if (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0)
             return 1;
-    } else if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) >= 0)
+    } else if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) >= 0) {
         return 1;
+    }
 
     SYSerr(SYS_F_IOCTL, errno);
     return 0;
@@ -624,9 +625,9 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
 
     if (md == NULL || digest_ctx == NULL)
         return 0;
-    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
         memcpy(md, digest_ctx->digest_res, EVP_MD_CTX_size(ctx));
-    else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
+    } else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
@@ -744,9 +745,9 @@ static void prepare_digest_methods(void)
 #ifdef CIOCGSESSINFO
         /* gather hardware acceleration info from the driver */
         siop.ses = sess1.ses;
-        if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0)
+        if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
             digest_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-        else {
+        } else {
             digest_driver_info[i].driver_name =
                 OPENSSL_strndup(siop.hash_info.cra_driver_name,
                                 CRYPTODEV_MAX_ALG_NAME);
@@ -974,11 +975,11 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     case DEVCRYPTO_CMD_CIPHERS:
         if (p == NULL)
             return 1;
-        if (strcasecmp((const char *)p, "ALL") == 0)
+        if (strcasecmp((const char *)p, "ALL") == 0) {
             devcrypto_select_all_ciphers(selected_ciphers);
-        else if (strcasecmp((const char*)p, "NONE") == 0)
+        } else if (strcasecmp((const char*)p, "NONE") == 0) {
             memset(selected_ciphers, 0, sizeof(selected_ciphers));
-        else {
+        } else {
             new_list=OPENSSL_zalloc(sizeof(selected_ciphers));
             if (!CONF_parse_list(p, ',', 1, cryptodev_select_cipher_cb, new_list)) {
                 OPENSSL_free(new_list);
@@ -994,11 +995,11 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     case DEVCRYPTO_CMD_DIGESTS:
         if (p == NULL)
             return 1;
-        if (strcasecmp((const char *)p, "ALL") == 0)
+        if (strcasecmp((const char *)p, "ALL") == 0) {
             devcrypto_select_all_digests(selected_digests);
-        else if (strcasecmp((const char*)p, "NONE") == 0)
+        } else if (strcasecmp((const char*)p, "NONE") == 0) {
             memset(selected_digests, 0, sizeof(selected_digests));
-        else {
+        } else {
             new_list=OPENSSL_zalloc(sizeof(selected_digests));
             if (!CONF_parse_list(p, ',', 1, cryptodev_select_digest_cb, new_list)) {
                 OPENSSL_free(new_list);
