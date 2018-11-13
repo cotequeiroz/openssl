@@ -35,14 +35,14 @@
  * saner...  why re-open /dev/crypto for every session?
  */
 static int cfd;
-static enum devcrypto_softdrivers_t {
-    DEVCRYPTO_REQUIRE_ACCELERATED   =  0, /* require confirmation of acceleration */
-    DEVCRYPTO_USE_SOFTWARE          =  1, /* allow software drivers */
-    DEVCRYPTO_REJECT_SOFTWARE       =  2  /* only disallow confirmed software drivers */
-} use_softdrivers = DEVCRYPTO_REJECT_SOFTWARE;
+#define DEVCRYPTO_REQUIRE_ACCELERATED 0 /* require confirmation of acceleration */
+#define DEVCRYPTO_USE_SOFTWARE        1 /* allow software drivers */
+#define DEVCRYPTO_REJECT_SOFTWARE     2  /* only disallow confirmed software drivers */
 
 #define STR_(S) #S
 #define STR(S)  STR_(S)
+
+static int use_softdrivers = DEVCRYPTO_REJECT_SOFTWARE;
 
 /*
  * cipher/digest status & acceleration definitions
