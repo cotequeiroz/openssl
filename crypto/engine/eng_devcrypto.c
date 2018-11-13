@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <assert.h>
 
@@ -252,11 +253,21 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
 {
     EVP_CIPHER_CTX *to_ctx = (EVP_CIPHER_CTX *)p2;
-    struct cipher_ctx *cipher_ctx;
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+# ifdef HAVE_SYSLOG_R
+    struct syslog_data sd = SYSLOG_DATA_INIT;
+# endif
 
+# ifdef HAVE_SYSLOG_R
+    syslog_r(LOG_ERR, &sd, "cipher_ctrl: CTX=%08lx, type=%d, p1=%d, p2=%08lx, "
+             "cipher_ctx=%08lx", (long)ctx, type, p1, (long)p2, (long)cipher_ctx);
+# else
+    syslog(LOG_ERR, "cipher_ctrl: CTX=%08lx, type=%d, p1=%d, p2=%08lx, "
+           "cipher_ctx=%08lx", (long)ctx, type, p1, (long)p2, (long)cipher_ctx);
+# endif
     if (type == EVP_CTRL_COPY) {
         /* when copying the context, a new session needs to be initialized */
-        cipher_ctx = (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
         return (cipher_ctx == NULL)
             || cipher_init(to_ctx, cipher_ctx->sess.key, EVP_CIPHER_CTX_iv(ctx),
                            (cipher_ctx->op == COP_ENCRYPT));
