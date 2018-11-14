@@ -661,13 +661,8 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         (struct digest_ctx *)EVP_MD_CTX_md_data(to);
     struct cphash_op cphash;
 
-    if (digest_from == NULL)
+    if (digest_from == NULL || digest_from->init != 1) 
         return 1;
-
-    if (digest_from->init != 1) {
-        SYSerr(SYS_F_IOCTL, EINVAL);
-        return 0;
-    }
 
     if (!digest_init(to)) {
         SYSerr(SYS_F_IOCTL, errno);
