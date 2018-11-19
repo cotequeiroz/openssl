@@ -42,7 +42,8 @@ static int cfd;
 #define STR_(S) #S
 #define STR(S)  STR_(S)
 
-static int use_softdrivers = DEVCRYPTO_REJECT_SOFTWARE;
+static int use_softdrivers = DEVCRYPTO_USE_SOFTWARE;
+//static int use_softdrivers = DEVCRYPTO_REJECT_SOFTWARE;
 
 /*
  * cipher/digest status & acceleration definitions
@@ -78,9 +79,6 @@ struct driver_info_st {
 
 struct cipher_ctx {
     struct session_op sess;
-
-    /* to pass from init to do_cipher */
-    const unsigned char *iv;
     int op;                      /* COP_ENCRYPT or COP_DECRYPT */
 };
 
@@ -122,10 +120,10 @@ static const struct cipher_data_st {
     { NID_aes_192_ecb, 16, 192 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
     { NID_aes_256_ecb, 16, 256 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
 #endif
-#if 0                            /* Not yet supported */
-    { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
-    { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
-    { NID_aes_256_gcm, 16, 256 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
+#ifndef OPENSSL_NO_AES_GCM
+    { NID_aes_128_gcm, 16, 128 / 8, 12, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
+    { NID_aes_192_gcm, 16, 192 / 8, 12, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
+    { NID_aes_256_gcm, 16, 256 / 8, 12, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
 #endif
 #ifndef OPENSSL_NO_CAMELLIA
     { NID_camellia_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE,
@@ -169,8 +167,9 @@ static const struct cipher_data_st *get_cipher_data(int nid)
 }
 
 /*
- * Following are the three necessary functions to map OpenSSL functionality
- * with cryptodev.
+ * Following are the four necessary functions to map OpenSSL functionality
+ * with cryptodev: cipher_init, cipher_do_cipher, cipher_ctrl, and
+ * cipher_cleanup
  */
 
 static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
@@ -276,6 +275,422 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
     return 1;
 }
 
+#ifndef OPENSSL_NO_AES_GCM
+
+struct gcm_ctx {
+    struct session_op ses;
+    struct crypt_auth_op cao;
+    int key_set;
+    int iv_set;
+
+    unsigned char tag[16];
+    unsigned char subkey[16];
+    uint64_t ptlen;
+    uint64_t aadlen;
+
+    unsigned char *iv;
+    int ivlen;
+    int taglen;
+    int iv_gen;
+    int tls_aad_len;
+};
+
+/*
+ * Following are the GCM version of the functions, adapted from
+ * crypto/evp/e_aes.c
+ */
+
+static int gcm_session_init(EVP_CIPHER_CTX *ctx,
+                            const unsigned char *key, int enc)
+{
+    struct gcm_ctx *gctx =
+        (struct gcm_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+
+
+    return 1;
+}
+
+static int gcm_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
+                    const unsigned char *iv, int enc)
+{
+    struct gcm_ctx *gctx =
+        (struct gcm_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    const struct cipher_data_st *cipher_d =
+        get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
+
+    if (!iv && !key)
+        return 1;
+
+    if (key) {
+        memset(&gctx->sess, 0, sizeof(&gctx->sess));
+        if (!gctx->iv_set)
+            memset(&gctx->cao, 0, sizeof(&gctx->cao));
+        gctx->sess.cipher = cipher_d->devcryptoid;
+        gctx->sess.keylen = cipher_d->keylen;
+        gctx->sess.key = (void *)key;
+        gctx->op = enc ? COP_ENCRYPT : COP_DECRYPT;
+        if (ioctl(cfd, CIOCGSESSION, &cipher_ctx->sess) < 0) {
+            SYSerr(SYS_F_IOCTL, errno);
+            return 0;
+        }
+        gctx->cao.ses = gctx->sess.ses;
+	gctx->cao.op = gctx->sess.op;
+        gctx->key_set = 1;
+    }
+    if (iv) {
+        memset(cipher_ctx->tag, 0, sizeof(cipher_ctx->tag));
+        if (!gctx->key_set) {
+            memset(&gctx->cao, 0, sizeof(&gctx->cao));
+            gctx->iv_gen = 0;
+        }
+        gctx->aadlen = 0;
+        gctx->ptlen = 0;
+        gctx->cao.iv = iv;
+        gctx->iv_set = 1;
+    }
+
+    return 1;
+}
+
+static int devcrypto_authcrypt(uint32_t ses, uint16_t op, uint16_t flags,
+                               uint32_t len, uint32_t auth_len, 
+                               unsigned char *auth_src, unsigned char *src,
+                               unsigned char *dst, unsigned char *tag,
+                               uint32_t tag_len, unsigned char *iv,
+                               uint32_t iv_len);
+{
+    struct crypt_auth_op cao;
+
+    cao.ses = ses;
+    cao.op = op;
+    cao.len = len;
+    cao.auth_len = auth_len;
+    cao.auth_src = auth_src;
+    cao.src = src;
+    cao.dst = dst;
+    cao.tag = tag;
+    cao.tag_len = tag_len;
+    cao.iv = iv;
+    cao.iv_len = iv_len;
+    cao.flags = flags;
+
+    return ioctl(cfd, CIOCAUTHCRYPT, &cao);
+}
+
+static int gcm_aad(struct cipher_ctx *cipher_ctx, const unsigned char *aad,
+                   size_t len, int enc, int keylen)
+{
+    uint64_t alen = cipher_ctx->aadlen;
+
+    if (ctx->ptlen)
+        return -2;
+
+    alen += len;
+    if (alen > (1ULL < 61) || (sizeof(len) == 8 && alen < len))
+        return -1;
+
+    cipher_ctx->aadlen = alen;
+
+    return devcrypto_authcrypt(cipher_ctx->session.ses, cipher_ctx->op,
+                               COP_FLAG_AEAD_TLS_TYPE, 0, len, aad, NULL,
+                               NULL, cipher_ctx->tag, cipher_ctx->taglen,
+                               cipher_ctx->iv, cipher-ctx->ivlen);
+}
+
+/*
+ * Handle TLS GCM packet format. This consists of the last portion of the IV
+ * followed by the payload and finally the tag. On encrypt generate IV,
+ * encrypt payload and write the tag. On verify retrieve IV, decrypt payload
+ * and verify tag.
+ */
+
+static int gcm_tls_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                          const unsigned char *in, size_t len)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    unsigned char *buf = EVP_CIPHER_CTX_buf_noconst(ctx);
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+    const int keylen = EVP_CIPHER_CTX_key_length(ctx);
+    int rv = -1;
+
+    if (out != in
+        || len < (EVP_GCM_TLS_EXPLICIT_IV_LEN + EVP_GCM_TLS_TAG_LEN))
+        return -1;
+
+    if (cipher_ctx->key_set == 0)
+        return 1;
+
+    /*
+     * Check for too many keys as per FIPS 140-2 IG A.5 "Key/IV Pair Uniqueness
+     * Requirements from SP 800-38D".  The requirements is for one party to the
+     * communication to fail after 2^64 - 1 keys.  We do this on the encrypting
+     * side only.
+     */
+    if (enc && ++cipher_ctx->tls_enc_records == 0) {
+        goto err;
+    }
+
+    /*
+     * Set IV from start of buffer or generate IV and write to start of
+     * buffer.
+     */
+    if (EVP_CIPHER_CTX_ctrl(ctx, ctx->encrypt ? EVP_CTRL_GCM_IV_GEN
+                                              : EVP_CTRL_GCM_SET_IV_INV,
+                            EVP_GCM_TLS_EXPLICIT_IV_LEN, out) <= 0)
+        goto err;
+    /* Use saved AAD */
+    if(!gcm_aad(cipher_ctx, buf, cipher_ctx->tls_aadlen, enc, keylen))
+        goto err;
+
+    /* Fix buffer and length to point to payload */
+    in += EVP_GCM_TLS_EXPLICIT_IV_LEN;
+    out += EVP_GCM_TLS_EXPLICIT_IV_LEN;
+    len -= EVP_GCM_TLS_EXPLICIT_IV_LEN + EVP_GCM_TLS_TAG_LEN;
+
+    if (!aes_gcm(cipher_ctx, in, out, len, enc, keylen))
+        goto err;
+
+    if (enc) {
+        out += len;
+        if (!gcm_tag(ctx, out, NULL, EVP_GCM_TLS_TAG_LEN))
+            goto err;
+        rv = len + EVP_GCM_TLS_EXPLICIT_IV_LEN + EVP_GCM_TLS_TAG_LEN;
+    } else {
+        if(!gcm_tag(ctx, bif, in + len, EVP_GCM_TLS_TAG_LEN)) {
+            OPENSSL_cleanse(out, len);
+            goto err;
+        }
+        rv = len;
+    }
+err:
+    cipher_ctx->iv_set = 0;
+    cipher_ctx->tls_aadlen = -1;
+    return rv;
+}
+
+static int gcm_aad(struct gcm_ctx *gctx, const unsigned char *aad,
+                   size_t len)
+{
+    unsigned char *new_aad;
+    uint32_t newlen = gctx->cao.auth_len + len;
+
+    if (len >= (1ULL << 32) || newlen < gctx->cao.auth_len)
+        return 0;
+
+    if (!(new_aad = OPENSSL_realloc(gctx->cao.auth_src, newlen)))
+        return 0;
+    gctx->cao.auth_src = new_aad;
+
+    memcpy(new_aad + gctx->cao.auth_len, in, len);
+    gctx->auth_len = newlen;
+
+    return 1;
+}
+
+static int gcm_authcrypt(struct gcm_ctx *gctx, unsigned char *out, 
+                         unsigned char *in, size_t len)
+{
+    if (ioctl(cfd, 
+    return ioctl(cfd, CIOCAUTHCRYPT, &cao);
+}
+
+static int gcm_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                            const unsigned char *in, size_t len)
+{
+    struct gcm_ctx *gctx =
+        (struct gcm_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+
+    if (cipher_ctx->key_set == 0)
+        return -1;
+
+    if (gctx->tls_aad_len >= 0)
+        return gcm_tls_cipher(ctx, out, in, len);
+
+    if (!gctx->iv_set)
+        return -1;
+
+    if (in) {
+        if (out == NULL) {
+            if (!gcm_aad(gctx, in, len))
+                return -1;
+        } else if (ctx->encrypt) {
+	    gctx->cao.src = (void *)in;
+	    gctx->cao.len = len;
+	    gctx->cao.dst = (void *)out;
+	    if (ioctl(cfd, CIOCAUTHCRYPT, &cao) < 0)
+	        return -1;
+        }
+	return len;
+    }
+    if (ioctl(cfd, CIOCAUTHCRYPT, &gctx->cao) < 0) {
+        SYSerr(SYS_F_IOCTL, errno);
+        return 0;
+    }
+
+    return 1;
+}
+
+/* increment counter (64-bit int) by 1 */
+static void ctr64_inc(unsigned char *counter)
+{
+    int n = 8;
+    unsigned char c;
+
+    do {
+        --n;
+        c = counter[n];
+        ++c;
+        counter[n] = c;
+        if (c)
+            return;
+    } while (n);
+}
+
+static int gcm_ctrl(EVP_CIPHER_CTX *ctx, int type, int arg, void* ptr)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    unsigned char *iv_nocost = EVP_CIPHER_CTX_iv_noconst(ctx);
+    unsigned char *buf_noconst = EVP_CIPHER_CTX_buf_noconst(ctx);
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+    EVP_CIPHER_CTX *out;
+    struct cipher_ctx *cipher_ctx_out;
+    unsigned int len;
+
+    switch(type) {
+    case EVP_CTRL_INIT:
+        cipher_ctx->key_set = 0;
+        cipher_ctx->iv_set = 0;
+        cipher_ctx->ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+        cipher_ctx->iv = iv_noconst;
+        cipher_ctx->taglen = -1;
+        cipher_ctx->iv_gen = 0;
+        cipher_ctx->tls_aad_len = -1;
+        return 1;
+
+    case EVP_CTRL_AEAD_SET_IVLEN:
+        if (arg <= 0)
+            return 0;
+        /* Allocate memory for IV if needed */
+        if ((arg > EVP_MAX_IV_LENGTH) && (arg > cipher_ctx->ivlen)) {
+            if (cipher_ctx->iv != iv_noconst)
+                OPENSSL_free(cipher_ctx->iv);
+            if ((cipher_ctx->iv = OPENSSL_malloc(arg)) == NULL)
+               return 0;
+        }
+        cipher_ctx->ivlen = arg;
+        return 1;
+
+    case EVP_CTRL_AEAD_SET_TAG:
+        if (arg <= 0 || arg > 16 || enc)
+            return 0;
+        memcpy(buf_noconst, ptr, arg);
+        cipher_ctx->taglen = arg;
+        return 1;
+
+    case EVP_CTRL_AEAD_GET_TAG:
+        if (arg <= 0 || arg > 16 || !enc || cipher_ctx->taglen < 0)
+            return 0;
+        memcpy(ptr, buf_noconst, arg);
+        return 1;
+
+    case EVP_CTRL_AEAD_SET_IV_FIXED:
+        /* Special case: -1 length restores whole IV */
+        if (arg == -1) {
+            memcpy(cipher_ctx->iv, ptr, cipher_ctx->ivlen);
+            cipher_ctx->iv_gen = 1;
+            return 1;
+        }
+        /*
+         * Fixed filed  must be at least 4 bytes and invocation field at least
+         * 8.
+         */
+        if ((arg < 4) || (cipher_ctx->ivlen - arg) < 8)
+            return 0;
+        if (arg)
+            memcpy(cipher_ctx->iv, ptr, arg);
+        if (enc && RAND_bytes(cipher_ctx->iv + arg, cipher_ctx->ivlen - arg) <= 0)
+            return 0;
+        cipher_ctx->iv_gen = 1;
+        return 1;
+
+    case EVP_CTRL_GCM_IV_GEN:
+        if (cipher_ctx->iv_gen == 0 || cipher_ctx->key_set == 0)
+            return 0;
+        if (!cipher_gcm_setiv(ctx))
+            return 0;
+        if (arg <= 0 || arg > cipher_ctx->ivlen)
+            arg = cipher_ctx->ivlen;
+        memcpy(ptr, cipher_ctx->iv + cipher_ctx->ivlen - arg, arg);
+        /*
+         * Invocation field will be at least 8 bytes in size and so no need
+         * to check wrap around or increment more than last 8 bytes.
+         */
+        ctr64_inc(cipher_ctx->iv + cipher_ctx->ivlen - 8);
+        cipher_ctx->iv_set = 1;
+        return 1;
+
+    case EVP_CTRL_GCM_SET_IV_INV:
+        if (cipher_ctx->iv_gen == 0 || cipher_ctx->key_set == 0 || enc)
+            return 0;
+        memcpy(cipher_ctx->iv + cipher_ctx->ivlen - arg, ptr, arg);
+        if (!cipher_gcm_setiv(ctx))
+            return 0;
+        cipher_ctx->iv_set = 1;
+        return 1;
+
+    case EVP_CTRL_AEAD_TLS1_AAD:
+        /* Save the AAD for later use */
+        if (arg != EVP_AEAD_TLS1_AAD_LEN)
+            return 0;
+        memcpy(buf_noconst, ptr, arg);
+        cipher_ctx->tls_aad_len = arg;
+        cipher_ctx->tls_enc_records = 0;
+        len = buf_noconst[arg - 2] << 8 | buf_noconst[arg - 1];
+        /* Correct length for explicit IV */
+        if (len < EVP_GCM_TLS_EXPLICIT_IV_LEN)
+            return 0;
+        len -= EVP_GCM_TLS_EXPLICIT_IV_LEN;
+        /* decrypting correct for tag too */
+        if (!enc) {
+            if (len < EVP_GCM_TLS_TAG_LEN)
+                return 0;
+            len -= EVP_GCM_TLS_TAG_LEN;
+        }
+        buf_noconst[arg - 2] = len >> 8;
+        buf_noconst[arg - 1] = len & 0xff;
+        /* Extra padding: tag appended to record */
+        return EVP_GCM_TLS_TAG_LEN;
+
+    case EVP_CTRL_COPY:
+        if (cipher_ctx == NULL) {
+            return 1;
+        } else {
+            *out = ptr;
+            cipher_ctx_out = (struct cipher_ctx *)
+                             EVP_CIPHER_CTX_get_cipher_data(out);
+
+            if (cipher_ctx->iv == iv_noconst) {
+                cipher_ctx_out->iv = EVP_CIPHER_CTX_iv_noconst(out);
+            } else {
+                if ((cipher_ctx_out->iv = OPENSSL_malloc(cipher_ctx->ivlen))
+                    == NULL)
+                   return 0;
+                memcpy(cipher_ctx_out->iv, cipher_ctx->iv, cipher_ctx->ivlen);
+            }
+        }
+        /* if key and iv are set, a new session needs to be initialized */
+        if (cipher_ctx_out->key_set && cipher_ctx_out->iv_set)
+            return cipher_init(ptr, cipher_ctx->sess.key, out->iv, enc);
+        return 1;
+
+    default:
+        return -1;
+    }
+}
+#endif /* ! OPENSSL_NO_AES_GCM */
+
 /*
  * Keep tables of known nids, associated methods, selected ciphers, and driver
  * info.
@@ -328,6 +743,36 @@ static void prepare_cipher_methods(void)
             continue;
         }
 
+#ifndef OPENSSL_NO_AES_GCM
+        if (cipher_data[i].flags & EVP_CIPH_MODE == EVP_CIPH_GCM_MODE) {
+            if ((known_cipher_methods[i] =
+                     EVP_CIPHER_meth_new(cipher_data[i].nid,
+                                         cipher_data[i].blocksize,
+                                         cipher_data[i].keylen)) == NULL
+                || !EVP_CIPHER_meth_set_iv_length(known_cipher_methods[i],
+                                                  cipher_data[i].ivlen)
+                || !EVP_CIPHER_meth_set_flags(known_cipher_methods[i],
+                                              cipher_data[i].flags
+                                              | EVP_CIPH_CUSTOM_IV
+                                              | EVP_CIPH_FLAG_CUSTOM_CIPHER
+                                              | EVP_CIPH_ALWAYS_CALL_INIT
+                                              | EVP_CIPH_CTRL_INIT
+                                              | EVP_CIPH_FLAG_AEAD_CIPHER
+                                              | EVP_CIPH_CUSTOM_COPY
+                                              | EVP_CIPH_FLAG_DEFAULT_ASN1)
+                || !EVP_CIPHER_meth_set_init(known_cipher_methods[i], gcm_init)
+                || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i],
+                                                  gcm_do_cipher),
+                || !EVP_CIPHER_meth_set_ctrl(known_cipher_methods[i], gcm_ctrl)
+                || !EVP_CIPHER_meth_set_cleanup(known_cipher_methods[i],
+                                                gcm_cleanup)
+                || !EVP_CIPHER_meth_set_impl_ctx_size(known_cipher_methods[i],
+                                                      sizeof(struct cipher_ctx)))
+                goto cipher_failure;
+            else
+                goto cipher_usable;
+        } else
+#endif
         if ((known_cipher_methods[i] =
                  EVP_CIPHER_meth_new(cipher_data[i].nid,
                                      cipher_data[i].blocksize,
@@ -340,37 +785,39 @@ static void prepare_cipher_methods(void)
                                           | EVP_CIPH_FLAG_DEFAULT_ASN1)
             || !EVP_CIPHER_meth_set_init(known_cipher_methods[i], cipher_init)
             || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i],
-                                              cipher_do_cipher)
+                                              cipher_do_cipher),
             || !EVP_CIPHER_meth_set_ctrl(known_cipher_methods[i], cipher_ctrl)
             || !EVP_CIPHER_meth_set_cleanup(known_cipher_methods[i],
                                             cipher_cleanup)
             || !EVP_CIPHER_meth_set_impl_ctx_size(known_cipher_methods[i],
-                                                  sizeof(struct cipher_ctx))) {
-            cipher_driver_info[i].status = DEVCRYPTO_STATUS_FAILURE;
-            EVP_CIPHER_meth_free(known_cipher_methods[i]);
-            known_cipher_methods[i] = NULL;
-        } else {
-            cipher_driver_info[i].status = DEVCRYPTO_STATUS_USABLE;
+                                                         sizeof(struct cipher_ctx)))
+            goto cipher_failure;
+cipher_usable:
+        cipher_driver_info[i].status = DEVCRYPTO_STATUS_USABLE;
 #ifdef CIOCGSESSINFO
-            siop.ses = sess.ses;
-            if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
-                cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-            } else {
-                cipher_driver_info[i].driver_name =
-                    OPENSSL_strndup(siop.cipher_info.cra_driver_name,
-                                    CRYPTODEV_MAX_ALG_NAME);
-                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
-                    cipher_driver_info[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
-                else
-                    cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATED;
-            }
-#endif /* CIOCGSESSINFO */
+        siop.ses = sess.ses;
+        if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
+            cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
+        } else {
+            cipher_driver_info[i].driver_name =
+                OPENSSL_strndup(siop.cipher_info.cra_driver_name,
+                                CRYPTODEV_MAX_ALG_NAME);
+            if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
+                cipher_driver_info[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
+            else
+                cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATED;
         }
+#endif /* CIOCGSESSINFO */
         ioctl(cfd, CIOCFSESSION, &sess.ses);
         if (devcrypto_test_cipher(i)) {
             known_cipher_nids[known_cipher_nids_amount++] =
                 cipher_data[i].nid;
         }
+        continue;
+cipher_failure:
+        cipher_driver_info[i].status = DEVCRYPTO_STATUS_FAILURE;
+        EVP_CIPHER_meth_free(known_cipher_methods[i]);
+        ioctl(cfd, CIOCFSESSION, &sess.ses);
     }
 }
 
