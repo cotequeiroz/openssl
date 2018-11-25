@@ -9,12 +9,16 @@
 
 #include "e_os.h"
 #include <string.h>
-#include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <assert.h>
+#include <linux/cryptouser.h>
+#include <linux/if_alg.h>
+#include <linux/netlink.h>
 
 #include <openssl/conf.h>
 #include <openssl/evp.h>
@@ -24,9 +28,214 @@
 
 #include "internal/engine.h"
 
-#ifdef CRYPTO_ALGORITHM_MIN
-# define CHECK_BSD_STYLE_MACROS
-#endif
+struct driver_info_st {
+    enum afalg_status_t {
+        AFALG_STATUS_FAILURE       = -3, /* unusable for other reason */
+        AFALG_STATUS_NO_COPY       = -2, /* hash state copy not supported */
+        AFALG_STATUS_NO_OPEN       = -1, /* bind call failed */
+        AFALG_STATUS_UNKNOWN       =  0, /* not tested yet */
+        AFALG_STATUS_USABLE        =  1  /* algo can be used */
+    } status;
+
+    enum afalg_accelerated_t {
+        AFALG_NOT_ACCELERATED      = -1, /* software implemented */
+        AFALG_ACCELERATION_UNKNOWN =  0, /* acceleration support unkown */
+        AFALG_ACCELERATED          =  1  /* hardware accelerated */
+    } accelerated;
+
+    char *driver_name;
+};
+
+static int get_afalg_socket(const char *salg_name, const char *salg_type)
+{
+    int fd = -1;
+    struct sockaddr_alg sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.salg_family = AF_ALG;
+    strncpy((char *)sa.salg_type, salg_type, sizeof(sa.salg_type) - 1);
+    strncpy((char *)sa.salg_name, salg_name, sizeof(sa.salg_name) - 1);
+    if ((fd = socket(AF_ALG, SOCK_SEQPACKET, 0)) < 0) {
+        SYSerr(SYS_F_SOCKET, errno);
+	return -1;
+    }
+
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0)
+        return fd;
+
+    SYSerr(SYS_F_BIND, errno);
+    close(fd);
+    return -1;
+}
+
+static int afalg_get_driver_name(const char *algo_name, char *driver_name,
+                                 size_t driver_len)
+{
+  int ret = -EFAULT;
+
+  /* NETLINK_CRYPTO specific */
+  char buf[CMSG_SPACE(CRYPTO_REPORT_MAXSIZE)];
+  struct nlmsghdr *res_n = (struct nlmsghdr *)buf;
+  struct {
+    struct nlmsghdr n;
+    struct crypto_user_alg cru;
+  } req;
+  struct crypto_user_alg *cru_res = NULL;
+
+  /* AF_NETLINK specific */
+  struct sockaddr_nl nl;
+  int nlfd =0;
+  struct iovec iov;
+  struct msghdr msg;
+
+  if (algo_name == NULL || driver_name == NULL || driver_len < 1)
+    return -EINVAL;
+
+  memset(&req, 0, sizeof(req));
+  memset(&buf, 0, sizeof(buf));
+  memset(&msg, 0, sizeof(msg));
+
+  req.n.nlmsg_len = NLMSG_LENGTH(sizeof(req.cru));
+  req.n.nlmsg_flags = NLM_F_REQUEST;
+  req.n.nlmsg_type = CRYPTO_MSG_GETALG;
+  strncpy(req.cru.cru_name, algo_name, sizeof(req.cru.cru_name) - 1);
+
+  /* open netlink socket */
+  nlfd =  socket(AF_NETLINK, SOCK_RAW, NETLINK_CRYPTO);
+  if (nlfd < 0) {
+    perror("Netlink error: cannot open netlink socket");
+    return -errno;
+  }
+  memset(&nl, 0, sizeof(nl));
+  nl.nl_family = AF_NETLINK;
+  if (bind(nlfd, (struct sockaddr*)&nl, sizeof(nl)) < 0) {
+    perror("Netlink error: cannot bind netlink socket");
+    ret = -errno;
+    goto out;
+  }
+
+  /* sending data */
+  memset(&nl, 0, sizeof(nl));
+  nl.nl_family = AF_NETLINK;
+  iov.iov_base = (void*) &req.n;
+  iov.iov_len = req.n.nlmsg_len;
+  msg.msg_name = &nl;
+  msg.msg_namelen = sizeof(nl);
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  if (sendmsg(nlfd, &msg, 0) < 0) {
+    perror("Netlink error: sendmsg failed");
+    ret = -errno;
+    goto out;
+  }
+
+  iov.iov_base = buf;
+  iov.iov_len = sizeof(buf);
+  while (1) {
+    if ((ret = recvmsg(nlfd, &msg, 0)) <= 0) {
+      if (errno == EINTR || errno == EAGAIN)
+         continue;
+      else if (ret == 0)
+        perror("Nelink error: no data");
+      else
+        perror("Nelink error: netlink receive error");
+      ret = -errno;
+      goto out;
+    }
+    if ((u_int32_t)ret > sizeof(buf)) {
+      perror("Netlink error: received too much data");
+      ret = -errno;
+      goto out;
+    }
+    break;
+  }
+
+  ret = -EFAULT;
+  if (res_n->nlmsg_type == NLMSG_ERROR) {
+    ret = 0;
+    goto out;
+  }
+
+  if (res_n->nlmsg_type == CRYPTO_MSG_GETALG)
+    cru_res = NLMSG_DATA(res_n);
+  if (!cru_res || res_n->nlmsg_len < NLMSG_SPACE(sizeof(*cru_res)))
+    goto out;
+
+  strncpy(driver_name, cru_res->cru_driver_name, driver_len -1);
+  driver_name[driver_len -1] = '\0';
+  ret = 1;
+out:
+  close(nlfd);
+  return ret;
+}
+
+static enum afalg_accelerated_t 
+afalg_accelerated(const char *driver_name)
+{
+    if (driver_name == NULL)
+        return AFALG_ACCELERATION_UNKNOWN;
+
+    /* look for known crypto engine names, like cryptodev-linux does */
+    if (!strncmp(driver_name, "artpec", 6)
+        || !strncmp(driver_name, "atmel-", 6)
+        || strstr(driver_name, "-caam")
+        || !strncmp(driver_name, "cavium-", 7)
+        || strstr(driver_name, "-ccp")
+        || strstr(driver_name, "-chcr")
+        || strstr(driver_name, "-dcp")
+        || strstr(driver_name, "geode")
+        || strstr(driver_name, "hifn")
+        || !strncmp(driver_name, "img-", 4)
+        || strstr(driver_name, "-iproc")
+        || strstr(driver_name, "-ixp4xx")
+        || !strncmp(driver_name, "mtk-", 4)
+        || strstr(driver_name, "-mtk")
+        || !strncmp(driver_name, "mv-", 3)
+        || strstr(driver_name, "-n2")
+        || !strncmp(driver_name, "n5_", 3)
+        || strstr(driver_name, "-nx")
+        || !strncmp(driver_name, "omap-", 5)
+        || strstr(driver_name, "-omap")
+        || !strncmp(driver_name, "p8_", 3)
+        || strstr(driver_name, "-padlock")
+        || strstr(driver_name, "-picoxcell")
+        || strstr(driver_name, "-ppc4xx")
+        || !strncmp(driver_name, "qat", 3)
+        || !strncmp(driver_name, "rk-", 3)
+        || strstr(driver_name, "-rk")
+        || strstr(driver_name, "-s5p")
+        || !strncmp(driver_name, "safexcel-", 9)
+        || !strncmp(driver_name, "sahara-", 7)
+        || strstr(driver_name, "-scc")
+        || !strncmp(driver_name, "stm32-", 6)
+        || strstr(driver_name, "-sun4i-ss")
+        || strstr(driver_name, "-talitos")
+        || strstr(driver_name, "-ux500"))
+        return AFALG_ACCELERATED;
+
+    /* these are known asm/software drivers */
+    if (strstr(driver_name, "-3way")
+        || strstr(driver_name, "-aesni")
+        || strstr(driver_name, "-arm")
+        || strstr(driver_name, "-asm")
+        || strstr(driver_name, "-avx")
+        || strstr(driver_name, "-ce")
+        || strstr(driver_name, "-fixed-time")
+        || strstr(driver_name, "-generic")
+        || strstr(driver_name, "-neon")
+        || strstr(driver_name, "-ni")
+        || !strncmp(driver_name, "octeon-", 7)
+        || strstr(driver_name, "-pclmul")
+        || strstr(driver_name, "-ppc-spe")
+        || strstr(driver_name, "-s390")
+        || strstr(driver_name, "-simd")
+        || strstr(driver_name, "-sparc64")
+        || strstr(driver_name, "-sse2")
+        || strstr(driver_name, "-ssse3"))
+        return AFALG_NOT_ACCELERATED;
+
+    return AFALG_ACCELERATION_UNKNOWN;
+}
 
 /******************************************************************************
  *
@@ -39,11 +248,8 @@
  *****/
 
 struct cipher_ctx {
-    struct session_op sess;
-
-    /* to pass from init to do_cipher */
-    const unsigned char *iv;
-    int op;                      /* COP_ENCRYPT or COP_DECRYPT */
+    int bfd, sfd;
+    unsigned int op;
 };
 
 static const struct cipher_data_st {
@@ -52,50 +258,46 @@ static const struct cipher_data_st {
     int keylen;
     int ivlen;
     int flags;
-    int devcryptoid;
+    const char *name;
 } cipher_data[] = {
 #ifndef OPENSSL_NO_DES
-    { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, CRYPTO_DES_CBC },
-    { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, CRYPTO_3DES_CBC },
+    { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, "cbc(aes)" },
+    { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, "cbc(des3_ede)" },
 #endif
 #ifndef OPENSSL_NO_BF
-    { NID_bf_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_BLF_CBC },
+    { NID_bf_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, "cbc(blowfish)" },
 #endif
 #ifndef OPENSSL_NO_CAST
-    { NID_cast5_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_CAST_CBC },
+    { NID_cast5_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, "cbc(cast5)" },
 #endif
-    { NID_aes_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC },
-    { NID_aes_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC },
-    { NID_aes_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE, CRYPTO_AES_CBC },
+    { NID_aes_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)" },
+    { NID_aes_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)" },
+    { NID_aes_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE, "cbc(aes)" },
 #ifndef OPENSSL_NO_RC4
-    { NID_rc4, 1, 16, 0, EVP_CIPH_STREAM_CIPHER, CRYPTO_ARC4 },
+    { NID_rc4, 1, 16, 0, EVP_CIPH_STREAM_CIPHER, "arc4" },
 #endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR)
-    { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
-    { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
-    { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
-#endif
+    { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)" },
+    { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)" },
+    { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, "ctr(aes)" },
 #if 0                            /* Not yet supported */
-    { NID_aes_128_xts, 16, 128 / 8 * 2, 16, EVP_CIPH_XTS_MODE, CRYPTO_AES_XTS },
-    { NID_aes_256_xts, 16, 256 / 8 * 2, 16, EVP_CIPH_XTS_MODE, CRYPTO_AES_XTS },
+    { NID_aes_128_xts, 16, 128 / 8 * 2, 16, EVP_CIPH_XTS_MODE, "xts(aes)" },
+    { NID_aes_256_xts, 16, 256 / 8 * 2, 16, EVP_CIPH_XTS_MODE, "xts(aes)" },
 #endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_ECB)
-    { NID_aes_128_ecb, 16, 128 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
-    { NID_aes_192_ecb, 16, 192 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
-    { NID_aes_256_ecb, 16, 256 / 8, 16, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
-#endif
+    { NID_aes_128_ecb, 16, 128 / 8, 16, EVP_CIPH_ECB_MODE, "ecb(aes)" },
+    { NID_aes_192_ecb, 16, 192 / 8, 16, EVP_CIPH_ECB_MODE, "ecb(aes)" },
+    { NID_aes_256_ecb, 16, 256 / 8, 16, EVP_CIPH_ECB_MODE, "ecb(aes)" },
 #if 0                            /* Not yet supported */
-    { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
-    { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
-    { NID_aes_256_gcm, 16, 256 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
+    { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, "gcm(aes)" },
+    { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, "gcm(aes)" },
+    { NID_aes_256_gcm, 16, 256 / 8, 16, EVP_CIPH_GCM_MODE, "gcm(aes)" },
 #endif
 #ifndef OPENSSL_NO_CAMELLIA
     { NID_camellia_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE,
-      CRYPTO_CAMELLIA_CBC },
+      "cbc(camellia)" },
     { NID_camellia_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE,
-      CRYPTO_CAMELLIA_CBC },
+      "cbc(camellia)" },
     { NID_camellia_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE,
-      CRYPTO_CAMELLIA_CBC },
+      "cbc(camellia)" },
 #endif
 };
 
@@ -143,17 +345,24 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
 
-    memset(&cipher_ctx->sess, 0, sizeof(cipher_ctx->sess));
-    cipher_ctx->sess.cipher = cipher_d->devcryptoid;
-    cipher_ctx->sess.keylen = cipher_d->keylen;
-    cipher_ctx->sess.key = (void *)key;
-    cipher_ctx->op = enc ? COP_ENCRYPT : COP_DECRYPT;
-    if (ioctl(cfd, CIOCGSESSION, &cipher_ctx->sess) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
+    cipher_ctx->bfd = cipher_ctx->sfd = -1;
+    if ((cipher_ctx->bfd =
+        get_afalg_socket(cipher_d->name, "skcipher")) < 0)
         return 0;
+
+    cipher_ctx->op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
+    if (setsockopt(cipher_ctx->bfd, SOL_ALG, ALG_SET_KEY, key, 
+	              EVP_CIPHER_CTX_key_length(ctx)) >= 0
+        && (cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) != -1) {
+        close(cipher_ctx->bfd);
+        return 1;
     }
 
-    return 1;
+    close(cipher_ctx->bfd);
+    if (cipher_ctx->sfd > -1)
+        close(cipher_ctx->sfd);
+    cipher_ctx->sfd = cipher_ctx->bfd = -1;
+    return 0;
 }
 
 static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
@@ -161,81 +370,120 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    struct crypt_op cryp;
-#if !defined(COP_FLAG_WRITE_IV)
+    struct msghdr msg = { 0 };
+    struct cmsghdr *cmsg;
+    struct af_alg_iv *aiv;
+    struct iovec iov;
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    char buf[CMSG_SPACE(sizeof(cipher_ctx->op))
+             + CMSG_SPACE(offsetof(struct af_alg_iv, iv) + EVP_MAX_IV_LENGTH)];
     unsigned char saved_iv[EVP_MAX_IV_LENGTH];
-#endif
+    ssize_t nbytes;
 
-    memset(&cryp, 0, sizeof(cryp));
-    cryp.ses = cipher_ctx->sess.ses;
-    cryp.len = inl;
-    cryp.src = (void *)in;
-    cryp.dst = (void *)out;
-    cryp.iv = (void *)EVP_CIPHER_CTX_iv_noconst(ctx);
-    cryp.op = cipher_ctx->op;
-#if !defined(COP_FLAG_WRITE_IV)
-    cryp.flags = 0;
+    memset(&buf, 0, sizeof(buf));
+    msg.msg_control = buf;
+    msg.msg_controllen = CMSG_SPACE(sizeof(cipher_ctx->op));
+    if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_ECB_MODE)
+      ivlen = 0;
+    else
+      msg.msg_controllen += CMSG_SPACE(offsetof(struct af_alg_iv, iv) + ivlen);
 
-    if (EVP_CIPHER_CTX_iv_length(ctx) > 0) {
-        assert(inl >= EVP_CIPHER_CTX_iv_length(ctx));
-        if (!EVP_CIPHER_CTX_encrypting(ctx)) {
-            unsigned char *ivptr = in + inl - EVP_CIPHER_CTX_iv_length(ctx);
+    cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_ALG;
+    cmsg->cmsg_type = ALG_SET_OP;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(cipher_ctx->op));
+    memcpy(CMSG_DATA(cmsg), &cipher_ctx->op, sizeof(cipher_ctx->op));
 
-            memcpy(saved_iv, ivptr, EVP_CIPHER_CTX_iv_length(ctx));
-        }
+    if (ivlen > 0) {
+        assert(inl >= ivlen);
+        if (!enc)
+            memcpy(saved_iv, in + inl - ivlen, ivlen);
+
+        cmsg = CMSG_NXTHDR(&msg, cmsg);
+        cmsg->cmsg_level = SOL_ALG;
+        cmsg->cmsg_type = ALG_SET_IV;
+        cmsg->cmsg_len = CMSG_LEN(offsetof(struct af_alg_iv, iv) + ivlen);
+        aiv = (void *)CMSG_DATA(cmsg);
+        aiv->ivlen = ivlen;
+        memcpy(aiv->iv, EVP_CIPHER_CTX_iv(ctx), ivlen);
     }
-#else
-    cryp.flags = COP_FLAG_WRITE_IV;
-#endif
 
-    if (ioctl(cfd, CIOCCRYPT, &cryp) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
+    iov.iov_base = (void *)in;
+    iov.iov_len = inl;
+
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    //msg.msg_flags = MSG_MORE;
+
+    if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, MSG_MORE)) < 0) {
+        perror ("cipher_do_cipher: sendmsg");
+	return 0;
+    } else if (nbytes != (ssize_t) inl) {
+        fprintf(stderr, "cipher_do_cipher: sent %zd bytes != inlen %zd\n",
+	        nbytes, inl);
+	return 0;
+    }
+    if ((nbytes = read(cipher_ctx->sfd, out, inl)) != (ssize_t) inl) {
+        fprintf(stderr, "cipher_do_cipher: read %zd bytes != inlen %zd\n",
+	        nbytes, inl);
         return 0;
     }
 
-#if !defined(COP_FLAG_WRITE_IV)
-    if (EVP_CIPHER_CTX_iv_length(ctx) > 0) {
-        unsigned char *ivptr = saved_iv;
-
-        assert(inl >= EVP_CIPHER_CTX_iv_length(ctx));
-        if (!EVP_CIPHER_CTX_encrypting(ctx))
-            ivptr = out + inl - EVP_CIPHER_CTX_iv_length(ctx);
-
-        memcpy(EVP_CIPHER_CTX_iv_noconst(ctx), ivptr,
-               EVP_CIPHER_CTX_iv_length(ctx));
+    if (ivlen > 0) {
+        assert(inl >= ivlen);
+        memcpy(EVP_CIPHER_CTX_iv_noconst(ctx),
+	        enc ? out + inl - ivlen : saved_iv, ivlen);
     }
-#endif
 
     return 1;
 }
 
 static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
 {
-    EVP_CIPHER_CTX *to_ctx = (EVP_CIPHER_CTX *)p2;
-    struct cipher_ctx *cipher_ctx;
+    struct cipher_ctx *to, *from;
 
-    if (type == EVP_CTRL_COPY) {
-        /* when copying the context, a new session needs to be initialized */
-        cipher_ctx = (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-        return (cipher_ctx == NULL)
-            || cipher_init(to_ctx, cipher_ctx->sess.key, EVP_CIPHER_CTX_iv(ctx),
-                           (cipher_ctx->op == COP_ENCRYPT));
-    }
+    if (type != EVP_CTRL_COPY)
+        return -1;
 
-    return -1;
+    from = (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    to = (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(
+            (EVP_CIPHER_CTX *)p2);
+
+    to->sfd = to->bfd = -1;
+    if((to->bfd = accept(from->bfd, NULL, 0)) != -1
+       && (to->sfd = accept(to->bfd, NULL, 0)) != -1)
+        return 1;
+
+    SYSerr(SYS_F_ACCEPT, errno);
+    if (to->bfd != -1)
+        close (to->bfd);
+    to->sfd = to->bfd = -1;
+
+    return 0;
 }
 
 static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    int ret=1;
 
-    if (ioctl(cfd, CIOCFSESSION, &cipher_ctx->sess.ses) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
+    if (cipher_ctx == NULL)
+        return 1;
+
+    if (cipher_ctx->bfd >= 0 && close(cipher_ctx->bfd) != 0) {
+        ret = 0;
     }
+    
+    if (cipher_ctx->sfd >= 0 && close(cipher_ctx->sfd) != 0) {
+        ret = 0;
+    } 
 
-    return 1;
+    cipher_ctx->bfd = cipher_ctx->sfd = -1;
+    if (!ret)
+        SYSerr(SYS_F_CLOSE, errno);
+    return ret;
 }
 
 /*
@@ -251,30 +499,16 @@ static int selected_ciphers[OSSL_NELEM(cipher_data)];
 static struct driver_info_st cipher_driver_info[OSSL_NELEM(cipher_data)];
 
 
-static int devcrypto_test_cipher(size_t cipher_data_index)
+static int afalg_test_cipher(size_t cipher_data_index)
 {
-    return (cipher_driver_info[cipher_data_index].status == DEVCRYPTO_STATUS_USABLE
-            && selected_ciphers[cipher_data_index] == 1
-            && (cipher_driver_info[cipher_data_index].accelerated
-                    == DEVCRYPTO_ACCELERATED
-                || use_softdrivers == DEVCRYPTO_USE_SOFTWARE
-                || (cipher_driver_info[cipher_data_index].accelerated
-                        != DEVCRYPTO_NOT_ACCELERATED
-                    && use_softdrivers == DEVCRYPTO_REJECT_SOFTWARE)));
+    return cipher_driver_info[cipher_data_index].status == AFALG_STATUS_USABLE
+            && selected_ciphers[cipher_data_index] == 1;
 }
 
 static void prepare_cipher_methods(void)
 {
     size_t i;
-    struct session_op sess;
-#ifdef CIOCGSESSINFO
-    struct session_info_op siop;
-#endif
-
-    memset(&cipher_driver_info, 0, sizeof(cipher_driver_info));
-
-    memset(&sess, 0, sizeof(sess));
-    sess.key = (void *)"01234567890123456789012345678901234567890123456789";
+    int fd;
 
     for (i = 0, known_cipher_nids_amount = 0;
          i < OSSL_NELEM(cipher_data); i++) {
@@ -283,12 +517,20 @@ static void prepare_cipher_methods(void)
         /*
          * Check that the cipher is usable
          */
-        sess.cipher = cipher_data[i].devcryptoid;
-        sess.keylen = cipher_data[i].keylen;
-        if (ioctl(cfd, CIOCGSESSION, &sess) < 0) {
-            cipher_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
+        if ((fd = get_afalg_socket(cipher_data[i].name, "skcipher")) < 0) {
+            cipher_driver_info[i].status = AFALG_STATUS_NO_OPEN;
             continue;
         }
+	close(fd);
+
+	/* gather hardware driver information */
+	cipher_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
+	if (cipher_driver_info[i].driver_name != NULL
+	    && afalg_get_driver_name(cipher_data[i].name,
+	                             cipher_driver_info[i].driver_name, 
+	                             CRYPTO_MAX_NAME) > 0)
+	    cipher_driver_info[i].accelerated = 
+	        afalg_accelerated(cipher_driver_info[i].driver_name);
 
         if ((known_cipher_methods[i] =
                  EVP_CIPHER_meth_new(cipher_data[i].nid,
@@ -299,6 +541,7 @@ static void prepare_cipher_methods(void)
             || !EVP_CIPHER_meth_set_flags(known_cipher_methods[i],
                                           cipher_data[i].flags
                                           | EVP_CIPH_CUSTOM_COPY
+					  | EVP_CIPH_ALWAYS_CALL_INIT
                                           | EVP_CIPH_FLAG_DEFAULT_ASN1)
             || !EVP_CIPHER_meth_set_init(known_cipher_methods[i], cipher_init)
             || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i],
@@ -308,31 +551,14 @@ static void prepare_cipher_methods(void)
                                             cipher_cleanup)
             || !EVP_CIPHER_meth_set_impl_ctx_size(known_cipher_methods[i],
                                                   sizeof(struct cipher_ctx))) {
-            cipher_driver_info[i].status = DEVCRYPTO_STATUS_FAILURE;
+            cipher_driver_info[i].status = AFALG_STATUS_FAILURE;
             EVP_CIPHER_meth_free(known_cipher_methods[i]);
             known_cipher_methods[i] = NULL;
         } else {
-            cipher_driver_info[i].status = DEVCRYPTO_STATUS_USABLE;
-#ifdef CIOCGSESSINFO
-            siop.ses = sess.ses;
-            if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
-                cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-            } else {
-                cipher_driver_info[i].driver_name =
-                    OPENSSL_strndup(siop.cipher_info.cra_driver_name,
-                                    CRYPTODEV_MAX_ALG_NAME);
-                if (!(siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY))
-                    cipher_driver_info[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
-                else
-                    cipher_driver_info[i].accelerated = DEVCRYPTO_ACCELERATED;
-            }
-#endif /* CIOCGSESSINFO */
+            cipher_driver_info[i].status = AFALG_STATUS_USABLE;
         }
-        ioctl(cfd, CIOCFSESSION, &sess.ses);
-        if (devcrypto_test_cipher(i)) {
-            known_cipher_nids[known_cipher_nids_amount++] =
-                cipher_data[i].nid;
-        }
+        if (afalg_test_cipher(i))
+            known_cipher_nids[known_cipher_nids_amount++] = cipher_data[i].nid;
     }
 }
 
@@ -341,7 +567,7 @@ static void rebuild_known_cipher_nids(void)
     size_t i;
 
     for (i = 0, known_cipher_nids_amount = 0; i < OSSL_NELEM(cipher_data); i++) {
-        if (devcrypto_test_cipher(i))
+        if (afalg_test_cipher(i))
             known_cipher_nids[known_cipher_nids_amount++] = cipher_data[i].nid;
     }
 }
@@ -376,11 +602,11 @@ static void destroy_all_cipher_methods(void)
     for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
         destroy_cipher_method(cipher_data[i].nid);
         OPENSSL_free(cipher_driver_info[i].driver_name);
-        cipher_driver_info[i].driver_name = NULL;
+	cipher_driver_info[i].driver_name = NULL;
     }
 }
 
-static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
+static int afalg_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
                              const int **nids, int nid)
 {
     if (cipher == NULL)
@@ -391,7 +617,7 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
     return *cipher != NULL;
 }
 
-static void devcrypto_select_all_ciphers(int *cipher_list)
+static void afalg_select_all_ciphers(int *cipher_list)
 {
     size_t i;
 
@@ -399,7 +625,7 @@ static void devcrypto_select_all_ciphers(int *cipher_list)
         cipher_list[i] = 1;
 }
 
-static int cryptodev_select_cipher_cb(const char *str, int len, void *usr)
+static int afalg_select_cipher_cb(const char *str, int len, void *usr)
 {
     int *cipher_list = (int *)usr;
     char *name;
@@ -412,11 +638,11 @@ static int cryptodev_select_cipher_cb(const char *str, int len, void *usr)
         return 0;
     EVP = EVP_get_cipherbyname(name);
     if (EVP == NULL)
-        fprintf(stderr, "devcrypto: unknown cipher %s\n", name);
+        fprintf(stderr, "afalg: unknown cipher %s\n", name);
     else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1)
         cipher_list[i] = 1;
     else
-        fprintf(stderr, "devcrypto: cipher %s not available\n", name);
+        fprintf(stderr, "afalg: cipher %s not available\n", name);
     OPENSSL_free(name);
     return 1;
 }
@@ -424,45 +650,33 @@ static int cryptodev_select_cipher_cb(const char *str, int len, void *usr)
 static void dump_cipher_info(void)
 {
     size_t i;
-    const char *name;
+    const char *evp_name;
 
-    fprintf (stderr, "Information about ciphers supported by the /dev/crypto"
+    fprintf (stderr, "Information about ciphers supported by the AF_ALG"
              " engine:\n");
-#ifndef CIOCGSESSINFO
-    fprintf(stderr, "CIOCGSESSINFO (session info call) unavailable\n");
-#endif
     for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
-        name = OBJ_nid2sn(cipher_data[i].nid);
-        fprintf (stderr, "Cipher %s, NID=%d, /dev/crypto info: id=%d, ",
-                 name ? name : "unknown", cipher_data[i].nid,
-                 cipher_data[i].devcryptoid);
-        if (cipher_driver_info[i].status == DEVCRYPTO_STATUS_NO_CIOCGSESSION ) {
-            fprintf (stderr, "CIOCGSESSION (session open call) failed\n");
-            continue;
-        }
-        fprintf (stderr, "driver=%s ", cipher_driver_info[i].driver_name ?
-                 cipher_driver_info[i].driver_name : "unknown");
-        if (cipher_driver_info[i].accelerated == DEVCRYPTO_ACCELERATED)
-            fprintf(stderr, "(hw accelerated)");
-        else if (cipher_driver_info[i].accelerated == DEVCRYPTO_NOT_ACCELERATED)
-            fprintf(stderr, "(software)");
-        else
-            fprintf(stderr, "(acceleration status unknown)");
-        if (cipher_driver_info[i].status == DEVCRYPTO_STATUS_FAILURE)
-            fprintf (stderr, ". Cipher setup failed");
-        fprintf(stderr, "\n");
+        evp_name = OBJ_nid2sn(cipher_data[i].nid);
+        fprintf (stderr, "Cipher %s, NID=%d, AF_ALG info: name=%s, ",
+                 evp_name ? evp_name : "unknown", cipher_data[i].nid,
+                 cipher_data[i].name);
+        if (cipher_driver_info[i].status == AFALG_STATUS_NO_OPEN) {
+            fprintf (stderr, "AF_ALG socket bind failed.\n");
+	    continue;
+	}
+	fprintf(stderr, " driver=%s ", cipher_driver_info[i].driver_name ?
+		 cipher_driver_info[i].driver_name : "unknown");
+        if (cipher_driver_info[i].accelerated == AFALG_ACCELERATED)
+	    fprintf (stderr, "(hw accelerated)");
+	else if (cipher_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
+	    fprintf(stderr, "(software)");
+	else
+	    fprintf(stderr, "(acceleration status unknown)");
+        if (cipher_driver_info[i].status == AFALG_STATUS_FAILURE)
+            fprintf (stderr, ". Cipher setup failed.");
+        fprintf (stderr, "\n");
     }
     fprintf(stderr, "\n");
 }
-
-/*
- * We only support digests if the cryptodev implementation supports multiple
- * data updates and session copying.  Otherwise, we would be forced to maintain
- * a cache, which is perilous if there's a lot of data coming in (if someone
- * wants to checksum an OpenSSL tarball, for example).
- */
-#if defined(CIOCCPHASH) && defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
-#define IMPLEMENT_DIGEST
 
 /******************************************************************************
  *
@@ -470,43 +684,33 @@ static void dump_cipher_info(void)
  *
  * Because they all do the same basic operation, we have only one set of
  * method functions for them all to share, and a mapping table between
- * NIDs and cryptodev IDs, with all the necessary size data.
+ * NIDs and AF_ALG names, with all the necessary size data.
  *
  *****/
 
 struct digest_ctx {
-    struct session_op sess;
     /* This signals that the init function was called, not that it succeeded. */
     int init_called;
-    unsigned char digest_res[HASH_MAX_LEN];
+    int bfd, sfd;
 };
 
 static const struct digest_data_st {
     int nid;
     int digestlen;
-    int devcryptoid;
+    char *name;
 } digest_data[] = {
 #ifndef OPENSSL_NO_MD5
-    { NID_md5, 16, CRYPTO_MD5 },
+    { NID_md5, 16, "md5" },
 #endif
-    { NID_sha1, 20, CRYPTO_SHA1 },
+    { NID_sha1, 20, "sha1" },
 #ifndef OPENSSL_NO_RMD160
-# if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_RIPEMD160)
-    { NID_ripemd160, 20, CRYPTO_RIPEMD160 },
-# endif
+    { NID_ripemd160, 20, "rmd160" },
 #endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_224)
-    { NID_sha224, 224 / 8, CRYPTO_SHA2_224 },
-#endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_256)
-    { NID_sha256, 256 / 8, CRYPTO_SHA2_256 },
-#endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_384)
-    { NID_sha384, 384 / 8, CRYPTO_SHA2_384 },
-#endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_512)
-    { NID_sha512, 512 / 8, CRYPTO_SHA2_512 },
-#endif
+    { NID_sha224, 224 / 8, "sha224" },
+    { NID_sha256, 256 / 8, "sha256" },
+    { NID_sha384, 384 / 8, "sha384" },
+    { NID_sha512, 512 / 8, "sha512" },
+    { NID_blake2b512, 512 / 8 , "blake2b512" }
 };
 
 static size_t find_digest_data_index(int nid)
@@ -554,35 +758,22 @@ static int digest_init(EVP_MD_CTX *ctx)
 
     digest_ctx->init_called = 1;
 
-    memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
-    digest_ctx->sess.mac = digest_d->devcryptoid;
-    if (ioctl(cfd, CIOCGSESSION, &digest_ctx->sess) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
-
-    return 1;
-}
-
-static int digest_op(struct digest_ctx *ctx, const void *src, size_t srclen,
-                     void *res, unsigned int flags)
-{
-    struct crypt_op cryp;
-
-    memset(&cryp, 0, sizeof(cryp));
-    cryp.ses = ctx->sess.ses;
-    cryp.len = srclen;
-    cryp.src = (void *)src;
-    cryp.dst = NULL;
-    cryp.mac = res;
-    cryp.flags = flags;
-    return ioctl(cfd, CIOCCRYPT, &cryp);
+    digest_ctx->sfd = -1;
+    if ((digest_ctx->bfd =
+        get_afalg_socket(digest_d->name, "hash")) < 0)
+	return 0;
+    if ((digest_ctx->sfd = accept(digest_ctx->bfd, NULL, 0)) >= 0)
+        return 1;
+    close(digest_ctx->bfd);
+    digest_ctx->bfd = -1;
+    return 0;
 }
 
 static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
+    int flags = 0;
 
     if (count == 0)
         return 1;
@@ -590,14 +781,12 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     if (digest_ctx == NULL)
         return 0;
 
-    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
-        if (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0)
-            return 1;
-    } else if (digest_op(digest_ctx, data, count, NULL, COP_FLAG_UPDATE) >= 0) {
-        return 1;
-    }
+    if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+        flags = MSG_MORE;
 
-    SYSerr(SYS_F_IOCTL, errno);
+    if (send(digest_ctx->sfd, data, count, flags) == (ssize_t)count)
+        return 1;
+
     return 0;
 }
 
@@ -605,16 +794,16 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
+    int len = EVP_MD_CTX_size(ctx);
 
     if (md == NULL || digest_ctx == NULL)
         return 0;
 
-    if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
-        memcpy(md, digest_ctx->digest_res, EVP_MD_CTX_size(ctx));
-    } else if (digest_op(digest_ctx, NULL, 0, md, COP_FLAG_FINAL) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
+    if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT) &&
+        (send(digest_ctx->sfd, NULL, 0, 0) < 0))
         return 0;
-    }
+    if (recv(digest_ctx->sfd, md, len, 0) != len)
+        return 0;
 
     return 1;
 }
@@ -625,37 +814,40 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         (struct digest_ctx *)EVP_MD_CTX_md_data(from);
     struct digest_ctx *digest_to =
         (struct digest_ctx *)EVP_MD_CTX_md_data(to);
-    struct cphash_op cphash;
 
     if (digest_from == NULL || digest_from->init_called != 1)
         return 1;
 
-    if (!digest_init(to)) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
+    digest_to->sfd = digest_to->bfd = -1;
+    if((digest_to->bfd = accept(digest_from->bfd, NULL, 0)) != -1
+       && (digest_to->sfd = accept(digest_from->sfd, NULL, 0)) != -1)
+        return 1;
 
-    cphash.src_ses = digest_from->sess.ses;
-    cphash.dst_ses = digest_to->sess.ses;
-    if (ioctl(cfd, CIOCCPHASH, &cphash) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
-    }
-    return 1;
+    SYSerr(SYS_F_ACCEPT, errno);
+    if (digest_to->bfd != -1)
+        close(digest_to->bfd);
+    digest_to->sfd = digest_to->bfd = -1;
+    return 0;
 }
 
 static int digest_cleanup(EVP_MD_CTX *ctx)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
+    int ret=1;
 
-    if (digest_ctx == NULL)
+    if (digest_ctx == NULL || digest_ctx->init_called != 1)
         return 1;
-    if (ioctl(cfd, CIOCFSESSION, &digest_ctx->sess.ses) < 0) {
-        SYSerr(SYS_F_IOCTL, errno);
-        return 0;
+
+    if (digest_ctx->bfd >= 0 && close(digest_ctx->bfd) != 0) {
+        ret = 0;
     }
-    return 1;
+    
+    if (digest_ctx->sfd >= 0 && close(digest_ctx->sfd) != 0) {
+        ret = 0;
+    } 
+
+    return ret;
 }
 
 /*
@@ -670,16 +862,10 @@ static EVP_MD *known_digest_methods[OSSL_NELEM(digest_data)] = { NULL, };
 static int selected_digests[OSSL_NELEM(digest_data)];
 static struct driver_info_st digest_driver_info[OSSL_NELEM(digest_data)];
 
-static int devcrypto_test_digest(size_t digest_data_index)
+static int afalg_test_digest(size_t digest_data_index)
 {
-    return (digest_driver_info[digest_data_index].status == DEVCRYPTO_STATUS_USABLE
-            && selected_digests[digest_data_index] == 1
-            && (digest_driver_info[digest_data_index].accelerated
-                    == DEVCRYPTO_ACCELERATED
-                || use_softdrivers == DEVCRYPTO_USE_SOFTWARE
-                || (digest_driver_info[digest_data_index].accelerated
-                        != DEVCRYPTO_NOT_ACCELERATED
-                    && use_softdrivers == DEVCRYPTO_REJECT_SOFTWARE)));
+    return digest_driver_info[digest_data_index].status == AFALG_STATUS_USABLE 
+        && selected_digests[digest_data_index] == 1;
 }
 
 static void rebuild_known_digest_nids(void)
@@ -687,7 +873,7 @@ static void rebuild_known_digest_nids(void)
     size_t i;
 
     for (i = 0, known_digest_nids_amount = 0; i < OSSL_NELEM(digest_data); i++) {
-        if (devcrypto_test_digest(i))
+        if (afalg_test_digest(i))
             known_digest_nids[known_digest_nids_amount++] = digest_data[i].nid;
     }
 }
@@ -695,60 +881,30 @@ static void rebuild_known_digest_nids(void)
 static void prepare_digest_methods(void)
 {
     size_t i;
-    struct session_op sess1, sess2;
-#ifdef CIOCGSESSINFO
-    struct session_info_op siop;
-#endif
-    struct cphash_op cphash;
-
-    memset(&digest_driver_info, 0, sizeof(digest_driver_info));
-
-    memset(&sess1, 0, sizeof(sess1));
-    memset(&sess2, 0, sizeof(sess2));
+    int fd;
 
     for (i = 0, known_digest_nids_amount = 0; i < OSSL_NELEM(digest_data);
          i++) {
 
         selected_digests[i] = 1;
-
         /*
          * Check that the digest is usable
          */
-        sess1.mac = digest_data[i].devcryptoid;
-        sess2.ses = 0;
-        if (ioctl(cfd, CIOCGSESSION, &sess1) < 0) {
-            digest_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
-            goto finish;
+        if ((fd = get_afalg_socket(digest_data[i].name, "hash")) < 0) {
+            digest_driver_info[i].status = AFALG_STATUS_NO_OPEN;
+	    continue;
         }
+	close(fd);
 
-#ifdef CIOCGSESSINFO
-        /* gather hardware acceleration info from the driver */
-        siop.ses = sess1.ses;
-        if (ioctl(cfd, CIOCGSESSINFO, &siop) < 0) {
-            digest_driver_info[i].accelerated = DEVCRYPTO_ACCELERATION_UNKNOWN;
-        } else {
-            digest_driver_info[i].driver_name =
-                OPENSSL_strndup(siop.hash_info.cra_driver_name,
-                                CRYPTODEV_MAX_ALG_NAME);
-            if (siop.flags & SIOP_FLAG_KERNEL_DRIVER_ONLY)
-                digest_driver_info[i].accelerated = DEVCRYPTO_ACCELERATED;
-            else
-                digest_driver_info[i].accelerated = DEVCRYPTO_NOT_ACCELERATED;
-        }
-#endif
+	/* gather hardware driver information */
+	digest_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
+	if (digest_driver_info[i].driver_name != NULL
+	    && afalg_get_driver_name(digest_data[i].name,
+	                             digest_driver_info[i].driver_name, 
+	                             CRYPTO_MAX_NAME) > 0)
+	    digest_driver_info[i].accelerated = 
+	        afalg_accelerated(digest_driver_info[i].driver_name);
 
-        /* digest must be capable of hash state copy */
-        sess2.mac = sess1.mac;
-        if (ioctl(cfd, CIOCGSESSION, &sess2) < 0) {
-            digest_driver_info[i].status = DEVCRYPTO_STATUS_FAILURE;
-            goto finish;
-        }
-        cphash.src_ses = sess1.ses;
-        cphash.dst_ses = sess2.ses;
-        if (ioctl(cfd, CIOCCPHASH, &cphash) < 0) {
-            digest_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCCPHASH;
-            goto finish;
-        }
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
                                                        NID_undef)) == NULL
             || !EVP_MD_meth_set_result_size(known_digest_methods[i],
@@ -760,17 +916,13 @@ static void prepare_digest_methods(void)
             || !EVP_MD_meth_set_cleanup(known_digest_methods[i], digest_cleanup)
             || !EVP_MD_meth_set_app_datasize(known_digest_methods[i],
                                              sizeof(struct digest_ctx))) {
-            digest_driver_info[i].status = DEVCRYPTO_STATUS_FAILURE;
+            digest_driver_info[i].status = AFALG_STATUS_FAILURE;
             EVP_MD_meth_free(known_digest_methods[i]);
             known_digest_methods[i] = NULL;
-            goto finish;
+        } else {
+            digest_driver_info[i].status = AFALG_STATUS_USABLE;
         }
-        digest_driver_info[i].status = DEVCRYPTO_STATUS_USABLE;
-finish:
-        ioctl(cfd, CIOCFSESSION, &sess1.ses);
-        if (sess2.ses != 0)
-            ioctl(cfd, CIOCFSESSION, &sess2.ses);
-        if (devcrypto_test_digest(i))
+        if (afalg_test_digest(i))
             known_digest_nids[known_digest_nids_amount++] = digest_data[i].nid;
     }
 }
@@ -782,12 +934,6 @@ static const EVP_MD *get_digest_method(int nid)
     if (i == (size_t)-1)
         return NULL;
     return known_digest_methods[i];
-}
-
-static int get_digest_nids(const int **nids)
-{
-    *nids = known_digest_nids;
-    return known_digest_nids_amount;
 }
 
 static void destroy_digest_method(int nid)
@@ -805,22 +951,23 @@ static void destroy_all_digest_methods(void)
     for (i = 0; i < OSSL_NELEM(digest_data); i++) {
         destroy_digest_method(digest_data[i].nid);
         OPENSSL_free(digest_driver_info[i].driver_name);
-        digest_driver_info[i].driver_name = NULL;
+	digest_driver_info[i].driver_name = NULL;
     }
 }
 
-static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
+static int afalg_digests(ENGINE *e, const EVP_MD **digest,
                              const int **nids, int nid)
 {
-    if (digest == NULL)
-        return get_digest_nids(nids);
-
+    if (digest == NULL) {
+        *nids = known_digest_nids;
+        return known_digest_nids_amount;
+    }
     *digest = get_digest_method(nid);
 
     return *digest != NULL;
 }
 
-static void devcrypto_select_all_digests(int *digest_list)
+static void afalg_select_all_digests(int *digest_list)
 {
     size_t i;
 
@@ -828,7 +975,7 @@ static void devcrypto_select_all_digests(int *digest_list)
         digest_list[i] = 1;
 }
 
-static int cryptodev_select_digest_cb(const char *str, int len, void *usr)
+static int afalg_select_digest_cb(const char *str, int len, void *usr)
 {
     int *digest_list = (int *)usr;
     char *name;
@@ -841,11 +988,11 @@ static int cryptodev_select_digest_cb(const char *str, int len, void *usr)
         return 0;
     EVP = EVP_get_digestbyname(name);
     if (EVP == NULL)
-        fprintf(stderr, "devcrypto: unknown digest %s\n", name);
+        fprintf(stderr, "afalg: unknown digest %s\n", name);
     else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1)
         digest_list[i] = 1;
     else
-        fprintf(stderr, "devcrypto: digest %s not available\n", name);
+        fprintf(stderr, "afalg: digest %s not available\n", name);
     OPENSSL_free(name);
     return 1;
 }
@@ -853,41 +1000,33 @@ static int cryptodev_select_digest_cb(const char *str, int len, void *usr)
 static void dump_digest_info(void)
 {
     size_t i;
-    const char *name;
+    const char *evp_name;
 
-    fprintf (stderr, "Information about digests supported by the /dev/crypto"
+    fprintf (stderr, "Information about digests supported by the AF_ALG"
              " engine:\n");
-#ifndef CIOCGSESSINFO
-    fprintf(stderr, "CIOCGSESSINFO (session info call) unavailable\n");
-#endif
 
     for (i = 0; i < OSSL_NELEM(digest_data); i++) {
-        name = OBJ_nid2sn(digest_data[i].nid);
-        fprintf (stderr, "Digest %s, NID=%d, /dev/crypto info: id=%d, driver=%s",
-                 name ? name : "unknown", digest_data[i].nid,
-                 digest_data[i].devcryptoid,
-                 digest_driver_info[i].driver_name ? digest_driver_info[i].driver_name : "unknown");
-        if (digest_driver_info[i].status == DEVCRYPTO_STATUS_NO_CIOCGSESSION) {
-            fprintf (stderr, ". CIOCGSESSION (session open) failed\n");
-            continue;
-        }
-        if (digest_driver_info[i].accelerated == DEVCRYPTO_ACCELERATED)
-            fprintf(stderr, " (hw accelerated)");
-        else if (digest_driver_info[i].accelerated == DEVCRYPTO_NOT_ACCELERATED)
-            fprintf(stderr, " (software)");
-        else
-            fprintf(stderr, " (acceleration status unknown)");
-        if (cipher_driver_info[i].status == DEVCRYPTO_STATUS_FAILURE)
-            fprintf (stderr, ". Cipher setup failed\n");
-        else if (digest_driver_info[i].status == DEVCRYPTO_STATUS_NO_CIOCCPHASH)
-            fprintf(stderr, ", CIOCCPHASH failed\n");
-        else
-            fprintf(stderr, ", CIOCCPHASH capable\n");
+        evp_name = OBJ_nid2sn(digest_data[i].nid);
+        fprintf (stderr, "Digest %s, NID=%d, AF_ALG info: name=%s, ",
+                 evp_name ? evp_name : "unknown", digest_data[i].nid,
+                 digest_data[i].name);
+        if (digest_driver_info[i].status == AFALG_STATUS_NO_OPEN) {
+            fprintf (stderr, "AF_ALG socket bind failed.\n");
+	    continue;
+	}
+	fprintf(stderr, " driver=%s ", digest_driver_info[i].driver_name ?
+		 digest_driver_info[i].driver_name : "unknown");
+        if (digest_driver_info[i].accelerated == AFALG_ACCELERATED)
+	    fprintf (stderr, "(hw accelerated)");
+	else if (digest_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
+	    fprintf(stderr, "(software)");
+	else
+	    fprintf(stderr, "(acceleration status unknown)");
+        if (digest_driver_info[i].status == AFALG_STATUS_FAILURE)
+            fprintf (stderr, ". Digest setup failed.");
+        fprintf (stderr, "\n");
     }
-    fprintf(stderr, "\n");
 }
-
-#endif
 
 /******************************************************************************
  *
@@ -895,39 +1034,44 @@ static void dump_digest_info(void)
  *
  *****/
 
-#define DEVCRYPTO_CMD_USE_SOFTDRIVERS ENGINE_CMD_BASE
-#define DEVCRYPTO_CMD_CIPHERS (ENGINE_CMD_BASE + 1)
-#define DEVCRYPTO_CMD_DIGESTS (ENGINE_CMD_BASE + 2)
-#define DEVCRYPTO_CMD_DUMP_INFO (ENGINE_CMD_BASE + 3)
+#define AFALG_CMD_CIPHERS (ENGINE_CMD_BASE)
+#define AFALG_CMD_DIGESTS (ENGINE_CMD_BASE + 1)
+#define AFALG_CMD_DUMP_INFO (ENGINE_CMD_BASE + 2)
 
-static const ENGINE_CMD_DEFN devcrypto_cmds[] = {
-   {DEVCRYPTO_CMD_CIPHERS,
-    "CIPHERS",
-    "either ALL, NONE, or a comma-separated list of ciphers to enable [default=ALL]",
-    ENGINE_CMD_FLAG_STRING},
+static const ENGINE_CMD_DEFN afalg_cmds[] = {
+    {AFALG_CMD_CIPHERS,
+     "CIPHERS",
+     "either ALL, NONE, or a comma-separated list of ciphers to enable [default=ALL]",
+     ENGINE_CMD_FLAG_STRING},
 
-   {DEVCRYPTO_CMD_DIGESTS,
-    "DIGESTS",
-    "either ALL, NONE, or a comma-separated list of digests to enable [default=ALL]",
-    ENGINE_CMD_FLAG_STRING},
+   {AFALG_CMD_DIGESTS,
+     "DIGESTS",
+     "either ALL, NONE, or a comma-separated list of digests to enable [default=ALL]",
+     ENGINE_CMD_FLAG_STRING},
 
-   {0, NULL, NULL, 0}
+   {AFALG_CMD_DUMP_INFO,
+     "DUMP_INFO",
+     "dump info about each algorithm to stderr; use 'openssl engine -pre DUMP_INFO afalg'",
+     ENGINE_CMD_FLAG_NO_INPUT},
+
+    {0, NULL, NULL, 0}
 };
 
-static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
+static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
 {
     int *new_list;
+
     switch(cmd) {
-    case DEVCRYPTO_CMD_CIPHERS:
+    case AFALG_CMD_CIPHERS:
         if (p == NULL)
             return 1;
         if (strcasecmp((const char *)p, "ALL") == 0) {
-            devcrypto_select_all_ciphers(selected_ciphers);
+            afalg_select_all_ciphers(selected_ciphers);
         } else if (strcasecmp((const char*)p, "NONE") == 0) {
             memset(selected_ciphers, 0, sizeof(selected_ciphers));
         } else {
             new_list=OPENSSL_zalloc(sizeof(selected_ciphers));
-            if (!CONF_parse_list(p, ',', 1, cryptodev_select_cipher_cb, new_list)) {
+            if (!CONF_parse_list(p, ',', 1, afalg_select_cipher_cb, new_list)) {
                 OPENSSL_free(new_list);
                 return 0;
             }
@@ -937,16 +1081,16 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         rebuild_known_cipher_nids();
         return 1;
 
-    case DEVCRYPTO_CMD_DIGESTS:
+    case AFALG_CMD_DIGESTS:
         if (p == NULL)
             return 1;
         if (strcasecmp((const char *)p, "ALL") == 0) {
-            devcrypto_select_all_digests(selected_digests);
+            afalg_select_all_digests(selected_digests);
         } else if (strcasecmp((const char*)p, "NONE") == 0) {
             memset(selected_digests, 0, sizeof(selected_digests));
         } else {
             new_list=OPENSSL_zalloc(sizeof(selected_digests));
-            if (!CONF_parse_list(p, ',', 1, cryptodev_select_digest_cb, new_list)) {
+            if (!CONF_parse_list(p, ',', 1, afalg_select_digest_cb, new_list)) {
                 OPENSSL_free(new_list);
                 return 0;
             }
@@ -956,10 +1100,15 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         rebuild_known_digest_nids();
         return 1;
 
+    case AFALG_CMD_DUMP_INFO:
+        dump_cipher_info();
+        dump_digest_info();
+        return 1;
+
     default:
         break;
     }
-    return -1;
+    return 0;
 }
 
 /******************************************************************************
@@ -968,17 +1117,15 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
  *
  *****/
 
-static int devcrypto_unload(ENGINE *e)
+static int afalg_unload(ENGINE *e)
 {
     destroy_all_cipher_methods();
-#ifdef IMPLEMENT_DIGEST
     destroy_all_digest_methods();
-#endif
-
-    close(cfd);
 
     return 1;
 }
+
+
 /*
  * This engine is always built into libcrypto, so it doesn't offer any
  * ability to be dynamically loadable.
@@ -986,33 +1133,29 @@ static int devcrypto_unload(ENGINE *e)
 void engine_load_devcrypto_int()
 {
     ENGINE *e = NULL;
+    int sock;
 
-    if ((cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
-        fprintf(stderr, "Could not open /dev/crypto: %s\n", strerror(errno));
+    /* Test if we can actually create an AF_ALG socket */
+    sock = socket(AF_ALG, SOCK_SEQPACKET, 0);
+    if (sock == -1) {
+        fprintf(stderr, "Could not create AF_ALG socket: %s\n", strerror(errno));
         return;
     }
+    close(sock);
 
     if ((e = ENGINE_new()) == NULL
-        || !ENGINE_set_destroy_function(e, devcrypto_unload)) {
+        || !ENGINE_set_destroy_function(e, afalg_unload)) {
         ENGINE_free(e);
-        /*
-         * We know that devcrypto_unload() won't be called when one of the
-         * above two calls have failed, so we close cfd explicitly here to
-         * avoid leaking resources.
-         */
-        close(cfd);
         return;
     }
 
     prepare_cipher_methods();
-#ifdef IMPLEMENT_DIGEST
     prepare_digest_methods();
-#endif
 
     if (!ENGINE_set_id(e, "devcrypto")
-        || !ENGINE_set_name(e, "/dev/crypto engine")
-        || !ENGINE_set_cmd_defns(e, devcrypto_cmds)
-        || !ENGINE_set_ctrl_function(e, devcrypto_ctrl)
+        || !ENGINE_set_name(e, "AF_ALG engine")
+        || !ENGINE_set_cmd_defns(e, afalg_cmds)
+        || !ENGINE_set_ctrl_function(e, afalg_ctrl)
 
 /*
  * Asymmetric ciphers aren't well supported with /dev/crypto.  Among the BSD
@@ -1036,22 +1179,20 @@ void engine_load_devcrypto_int()
  */
 #if 0
 # ifndef OPENSSL_NO_RSA
-        || !ENGINE_set_RSA(e, devcrypto_rsa)
+        || !ENGINE_set_RSA(e, afalg_rsa)
 # endif
 # ifndef OPENSSL_NO_DSA
-        || !ENGINE_set_DSA(e, devcrypto_dsa)
+        || !ENGINE_set_DSA(e, afalg_dsa)
 # endif
 # ifndef OPENSSL_NO_DH
-        || !ENGINE_set_DH(e, devcrypto_dh)
+        || !ENGINE_set_DH(e, afalg_dh)
 # endif
 # ifndef OPENSSL_NO_EC
-        || !ENGINE_set_EC(e, devcrypto_ec)
+        || !ENGINE_set_EC(e, afalg_ec)
 # endif
 #endif
-        || !ENGINE_set_ciphers(e, devcrypto_ciphers)
-#ifdef IMPLEMENT_DIGEST
-        || !ENGINE_set_digests(e, devcrypto_digests)
-#endif
+        || !ENGINE_set_ciphers(e, afalg_ciphers)
+        || !ENGINE_set_digests(e, afalg_digests)
         ) {
         ENGINE_free(e);
         return;
