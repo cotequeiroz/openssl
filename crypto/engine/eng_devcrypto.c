@@ -57,7 +57,7 @@ static int get_afalg_socket(const char *salg_name, const char *salg_type)
     strncpy((char *)sa.salg_name, salg_name, sizeof(sa.salg_name) - 1);
     if ((fd = socket(AF_ALG, SOCK_SEQPACKET, 0)) < 0) {
         SYSerr(SYS_F_SOCKET, errno);
-	return -1;
+        return -1;
     }
 
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0)
@@ -169,7 +169,7 @@ out:
   return ret;
 }
 
-static enum afalg_accelerated_t 
+static enum afalg_accelerated_t
 afalg_accelerated(const char *driver_name)
 {
     if (driver_name == NULL)
@@ -248,7 +248,7 @@ afalg_accelerated(const char *driver_name)
  *****/
 
 struct cipher_ctx {
-    int bfd, sfd;
+    int sfd;
     unsigned int op;
 };
 
@@ -261,7 +261,7 @@ static const struct cipher_data_st {
     const char *name;
 } cipher_data[] = {
 #ifndef OPENSSL_NO_DES
-    { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, "cbc(aes)" },
+    { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, "cbc(des)" },
     { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, "cbc(des3_ede)" },
 #endif
 #ifndef OPENSSL_NO_BF
@@ -344,50 +344,49 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
+    char *type;
+    int fd;
 
-    cipher_ctx->bfd = cipher_ctx->sfd = -1;
-    if ((cipher_ctx->bfd =
-        get_afalg_socket(cipher_d->name, "skcipher")) < 0)
+    cipher_ctx->sfd = -1;
+    if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_STREAM_CIPHER)
+        type = "cipher";
+    else
+        type = "skcipher";
+    if ((fd = get_afalg_socket(cipher_d->name, type)) < 0)
         return 0;
 
     cipher_ctx->op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
-    if (setsockopt(cipher_ctx->bfd, SOL_ALG, ALG_SET_KEY, key, 
-	              EVP_CIPHER_CTX_key_length(ctx)) >= 0
-        && (cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) != -1) {
-        close(cipher_ctx->bfd);
+
+    if ((key == NULL
+         || setsockopt(fd, SOL_ALG, ALG_SET_KEY, key,
+                       EVP_CIPHER_CTX_key_length(ctx)) >= 0)
+        && (cipher_ctx->sfd = accept(fd, NULL, 0)) != -1) {
+        close(fd);
         return 1;
     }
 
-    close(cipher_ctx->bfd);
+    close(fd);
     if (cipher_ctx->sfd > -1)
         close(cipher_ctx->sfd);
-    cipher_ctx->sfd = cipher_ctx->bfd = -1;
+    cipher_ctx->sfd = -1;
     return 0;
 }
 
-static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
-                            const unsigned char *in, size_t inl)
+static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
+                           const unsigned char *in, size_t inl, int enc,
+                           const unsigned char *iv, size_t ivlen)
 {
-    struct cipher_ctx *cipher_ctx =
-        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     struct msghdr msg = { 0 };
     struct cmsghdr *cmsg;
     struct af_alg_iv *aiv;
     struct iovec iov;
-    int enc = EVP_CIPHER_CTX_encrypting(ctx);
-    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
     char buf[CMSG_SPACE(sizeof(cipher_ctx->op))
              + CMSG_SPACE(offsetof(struct af_alg_iv, iv) + EVP_MAX_IV_LENGTH)];
-    unsigned char saved_iv[EVP_MAX_IV_LENGTH];
     ssize_t nbytes;
 
     memset(&buf, 0, sizeof(buf));
     msg.msg_control = buf;
     msg.msg_controllen = CMSG_SPACE(sizeof(cipher_ctx->op));
-    if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_ECB_MODE)
-      ivlen = 0;
-    else
-      msg.msg_controllen += CMSG_SPACE(offsetof(struct af_alg_iv, iv) + ivlen);
 
     cmsg = CMSG_FIRSTHDR(&msg);
     cmsg->cmsg_level = SOL_ALG;
@@ -396,17 +395,14 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     memcpy(CMSG_DATA(cmsg), &cipher_ctx->op, sizeof(cipher_ctx->op));
 
     if (ivlen > 0) {
-        assert(inl >= ivlen);
-        if (!enc)
-            memcpy(saved_iv, in + inl - ivlen, ivlen);
-
+        msg.msg_controllen += CMSG_SPACE(offsetof(struct af_alg_iv, iv) + ivlen);
         cmsg = CMSG_NXTHDR(&msg, cmsg);
         cmsg->cmsg_level = SOL_ALG;
         cmsg->cmsg_type = ALG_SET_IV;
         cmsg->cmsg_len = CMSG_LEN(offsetof(struct af_alg_iv, iv) + ivlen);
         aiv = (void *)CMSG_DATA(cmsg);
         aiv->ivlen = ivlen;
-        memcpy(aiv->iv, EVP_CIPHER_CTX_iv(ctx), ivlen);
+        memcpy(aiv->iv, iv, ivlen);
     }
 
     iov.iov_base = (void *)in;
@@ -414,29 +410,75 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    //msg.msg_flags = MSG_MORE;
 
     if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, MSG_MORE)) < 0) {
         perror ("cipher_do_cipher: sendmsg");
-	return 0;
+        return 0;
     } else if (nbytes != (ssize_t) inl) {
         fprintf(stderr, "cipher_do_cipher: sent %zd bytes != inlen %zd\n",
-	        nbytes, inl);
-	return 0;
+                nbytes, inl);
+        return 0;
     }
     if ((nbytes = read(cipher_ctx->sfd, out, inl)) != (ssize_t) inl) {
         fprintf(stderr, "cipher_do_cipher: read %zd bytes != inlen %zd\n",
-	        nbytes, inl);
+                nbytes, inl);
         return 0;
     }
 
-    if (ivlen > 0) {
-        assert(inl >= ivlen);
-        memcpy(EVP_CIPHER_CTX_iv_noconst(ctx),
-	        enc ? out + inl - ivlen : saved_iv, ivlen);
-    }
+    return 1;
+}
+
+static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                         const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+    unsigned char saved_iv[EVP_MAX_IV_LENGTH];
+
+    assert(inl >= ivlen);
+    if (!enc)
+        memcpy(saved_iv, in + inl - ivlen, ivlen);
+    if (!afalg_do_cipher(cipher_ctx, out, in, inl, enc, iv, ivlen))
+        return 0;
+    memcpy(iv, enc ? out + inl - ivlen : saved_iv, ivlen);
 
     return 1;
+}
+
+static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                         const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+    uint32_t n = ivlen, c = 1;
+
+    if (!afalg_do_cipher(cipher_ctx, out, in, inl, enc, iv, ivlen))
+        return 0;
+    /* increment iv */
+    do {
+        --n;
+        c += iv[n];
+        iv[n] = (uint8_t) c;
+	c >>= 8;
+    } while (n);
+
+    return 1;
+}
+
+static int ecb_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                         const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    int enc = EVP_CIPHER_CTX_encrypting(ctx);
+
+    return afalg_do_cipher(cipher_ctx, out, in, inl, enc, NULL, 0);
 }
 
 static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
@@ -450,15 +492,12 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
     to = (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(
             (EVP_CIPHER_CTX *)p2);
 
-    to->sfd = to->bfd = -1;
-    if((to->bfd = accept(from->bfd, NULL, 0)) != -1
-       && (to->sfd = accept(to->bfd, NULL, 0)) != -1)
+    to->sfd = -1;
+    if ((to->sfd = accept(from->sfd, NULL, 0)) != -1)
         return 1;
 
     SYSerr(SYS_F_ACCEPT, errno);
-    if (to->bfd != -1)
-        close (to->bfd);
-    to->sfd = to->bfd = -1;
+    to->sfd = -1;
 
     return 0;
 }
@@ -467,23 +506,17 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    int ret=1;
 
     if (cipher_ctx == NULL)
         return 1;
 
-    if (cipher_ctx->bfd >= 0 && close(cipher_ctx->bfd) != 0) {
-        ret = 0;
-    }
-    
     if (cipher_ctx->sfd >= 0 && close(cipher_ctx->sfd) != 0) {
-        ret = 0;
-    } 
-
-    cipher_ctx->bfd = cipher_ctx->sfd = -1;
-    if (!ret)
         SYSerr(SYS_F_CLOSE, errno);
-    return ret;
+        return 0;
+    }
+
+    cipher_ctx->sfd = -1;
+    return 1;
 }
 
 /*
@@ -509,6 +542,9 @@ static void prepare_cipher_methods(void)
 {
     size_t i;
     int fd;
+    char *type;
+    int (*do_cipher) (EVP_CIPHER_CTX *, unsigned char *, const unsigned char *,
+                      size_t);
 
     for (i = 0, known_cipher_nids_amount = 0;
          i < OSSL_NELEM(cipher_data); i++) {
@@ -517,20 +553,40 @@ static void prepare_cipher_methods(void)
         /*
          * Check that the cipher is usable
          */
-        if ((fd = get_afalg_socket(cipher_data[i].name, "skcipher")) < 0) {
+        if ((cipher_data[i].flags & EVP_CIPH_MODE) == EVP_CIPH_STREAM_CIPHER)
+            type = "cipher";
+        else
+            type = "skcipher";
+        if ((fd = get_afalg_socket(cipher_data[i].name, type)) < 0) {
             cipher_driver_info[i].status = AFALG_STATUS_NO_OPEN;
             continue;
         }
-	close(fd);
+        close(fd);
 
-	/* gather hardware driver information */
-	cipher_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
-	if (cipher_driver_info[i].driver_name != NULL
-	    && afalg_get_driver_name(cipher_data[i].name,
-	                             cipher_driver_info[i].driver_name, 
-	                             CRYPTO_MAX_NAME) > 0)
-	    cipher_driver_info[i].accelerated = 
-	        afalg_accelerated(cipher_driver_info[i].driver_name);
+        /* gather hardware driver information */
+        cipher_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
+        if (cipher_driver_info[i].driver_name != NULL
+            && afalg_get_driver_name(cipher_data[i].name,
+                                     cipher_driver_info[i].driver_name,
+                                     CRYPTO_MAX_NAME) > 0)
+            cipher_driver_info[i].accelerated =
+                afalg_accelerated(cipher_driver_info[i].driver_name);
+
+        switch (cipher_data[i].flags & EVP_CIPH_MODE) {
+	case EVP_CIPH_CBC_MODE:
+	    do_cipher = cbc_do_cipher;
+	    break;
+        case EVP_CIPH_CTR_MODE:
+	    do_cipher = ctr_do_cipher;
+	    break;
+        case EVP_CIPH_ECB_MODE:
+	    do_cipher = ecb_do_cipher;
+	    break;
+	default:
+            cipher_driver_info[i].status = AFALG_STATUS_FAILURE;
+            known_cipher_methods[i] = NULL;
+	    continue;
+	}
 
         if ((known_cipher_methods[i] =
                  EVP_CIPHER_meth_new(cipher_data[i].nid,
@@ -541,11 +597,10 @@ static void prepare_cipher_methods(void)
             || !EVP_CIPHER_meth_set_flags(known_cipher_methods[i],
                                           cipher_data[i].flags
                                           | EVP_CIPH_CUSTOM_COPY
-					  | EVP_CIPH_ALWAYS_CALL_INIT
+                                          | EVP_CIPH_ALWAYS_CALL_INIT
                                           | EVP_CIPH_FLAG_DEFAULT_ASN1)
             || !EVP_CIPHER_meth_set_init(known_cipher_methods[i], cipher_init)
-            || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i],
-                                              cipher_do_cipher)
+            || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i], do_cipher)
             || !EVP_CIPHER_meth_set_ctrl(known_cipher_methods[i], cipher_ctrl)
             || !EVP_CIPHER_meth_set_cleanup(known_cipher_methods[i],
                                             cipher_cleanup)
@@ -556,13 +611,13 @@ static void prepare_cipher_methods(void)
             known_cipher_methods[i] = NULL;
         } else {
             cipher_driver_info[i].status = AFALG_STATUS_USABLE;
+            if (afalg_test_cipher(i))
+                known_cipher_nids[known_cipher_nids_amount++] = cipher_data[i].nid;
         }
-        if (afalg_test_cipher(i))
-            known_cipher_nids[known_cipher_nids_amount++] = cipher_data[i].nid;
     }
 }
 
-static void rebuild_known_cipher_nids(void)
+static void rebuild_known_cipher_nids(ENGINE *e)
 {
     size_t i;
 
@@ -570,6 +625,8 @@ static void rebuild_known_cipher_nids(void)
         if (afalg_test_cipher(i))
             known_cipher_nids[known_cipher_nids_amount++] = cipher_data[i].nid;
     }
+    ENGINE_unregister_ciphers(e);
+    ENGINE_register_ciphers(e);
 }
 
 static const EVP_CIPHER *get_cipher_method(int nid)
@@ -602,7 +659,7 @@ static void destroy_all_cipher_methods(void)
     for (i = 0; i < OSSL_NELEM(cipher_data); i++) {
         destroy_cipher_method(cipher_data[i].nid);
         OPENSSL_free(cipher_driver_info[i].driver_name);
-	cipher_driver_info[i].driver_name = NULL;
+        cipher_driver_info[i].driver_name = NULL;
     }
 }
 
@@ -661,16 +718,16 @@ static void dump_cipher_info(void)
                  cipher_data[i].name);
         if (cipher_driver_info[i].status == AFALG_STATUS_NO_OPEN) {
             fprintf (stderr, "AF_ALG socket bind failed.\n");
-	    continue;
-	}
-	fprintf(stderr, " driver=%s ", cipher_driver_info[i].driver_name ?
-		 cipher_driver_info[i].driver_name : "unknown");
+            continue;
+        }
+        fprintf(stderr, " driver=%s ", cipher_driver_info[i].driver_name ?
+                 cipher_driver_info[i].driver_name : "unknown");
         if (cipher_driver_info[i].accelerated == AFALG_ACCELERATED)
-	    fprintf (stderr, "(hw accelerated)");
-	else if (cipher_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
-	    fprintf(stderr, "(software)");
-	else
-	    fprintf(stderr, "(acceleration status unknown)");
+            fprintf (stderr, "(hw accelerated)");
+        else if (cipher_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
+            fprintf(stderr, "(software)");
+        else
+            fprintf(stderr, "(acceleration status unknown)");
         if (cipher_driver_info[i].status == AFALG_STATUS_FAILURE)
             fprintf (stderr, ". Cipher setup failed.");
         fprintf (stderr, "\n");
@@ -761,7 +818,7 @@ static int digest_init(EVP_MD_CTX *ctx)
     digest_ctx->sfd = -1;
     if ((digest_ctx->bfd =
         get_afalg_socket(digest_d->name, "hash")) < 0)
-	return 0;
+        return 0;
     if ((digest_ctx->sfd = accept(digest_ctx->bfd, NULL, 0)) >= 0)
         return 1;
     close(digest_ctx->bfd);
@@ -842,10 +899,10 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     if (digest_ctx->bfd >= 0 && close(digest_ctx->bfd) != 0) {
         ret = 0;
     }
-    
+
     if (digest_ctx->sfd >= 0 && close(digest_ctx->sfd) != 0) {
         ret = 0;
-    } 
+    }
 
     return ret;
 }
@@ -864,11 +921,11 @@ static struct driver_info_st digest_driver_info[OSSL_NELEM(digest_data)];
 
 static int afalg_test_digest(size_t digest_data_index)
 {
-    return digest_driver_info[digest_data_index].status == AFALG_STATUS_USABLE 
+    return digest_driver_info[digest_data_index].status == AFALG_STATUS_USABLE
         && selected_digests[digest_data_index] == 1;
 }
 
-static void rebuild_known_digest_nids(void)
+static void rebuild_known_digest_nids(ENGINE *e)
 {
     size_t i;
 
@@ -876,6 +933,8 @@ static void rebuild_known_digest_nids(void)
         if (afalg_test_digest(i))
             known_digest_nids[known_digest_nids_amount++] = digest_data[i].nid;
     }
+    ENGINE_unregister_digests(e);
+    ENGINE_register_digests(e);
 }
 
 static void prepare_digest_methods(void)
@@ -892,18 +951,18 @@ static void prepare_digest_methods(void)
          */
         if ((fd = get_afalg_socket(digest_data[i].name, "hash")) < 0) {
             digest_driver_info[i].status = AFALG_STATUS_NO_OPEN;
-	    continue;
+            continue;
         }
-	close(fd);
+        close(fd);
 
-	/* gather hardware driver information */
-	digest_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
-	if (digest_driver_info[i].driver_name != NULL
-	    && afalg_get_driver_name(digest_data[i].name,
-	                             digest_driver_info[i].driver_name, 
-	                             CRYPTO_MAX_NAME) > 0)
-	    digest_driver_info[i].accelerated = 
-	        afalg_accelerated(digest_driver_info[i].driver_name);
+        /* gather hardware driver information */
+        digest_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
+        if (digest_driver_info[i].driver_name != NULL
+            && afalg_get_driver_name(digest_data[i].name,
+                                     digest_driver_info[i].driver_name,
+                                     CRYPTO_MAX_NAME) > 0)
+            digest_driver_info[i].accelerated =
+                afalg_accelerated(digest_driver_info[i].driver_name);
 
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
                                                        NID_undef)) == NULL
@@ -951,7 +1010,7 @@ static void destroy_all_digest_methods(void)
     for (i = 0; i < OSSL_NELEM(digest_data); i++) {
         destroy_digest_method(digest_data[i].nid);
         OPENSSL_free(digest_driver_info[i].driver_name);
-	digest_driver_info[i].driver_name = NULL;
+        digest_driver_info[i].driver_name = NULL;
     }
 }
 
@@ -1012,16 +1071,16 @@ static void dump_digest_info(void)
                  digest_data[i].name);
         if (digest_driver_info[i].status == AFALG_STATUS_NO_OPEN) {
             fprintf (stderr, "AF_ALG socket bind failed.\n");
-	    continue;
-	}
-	fprintf(stderr, " driver=%s ", digest_driver_info[i].driver_name ?
-		 digest_driver_info[i].driver_name : "unknown");
+            continue;
+        }
+        fprintf(stderr, " driver=%s ", digest_driver_info[i].driver_name ?
+                 digest_driver_info[i].driver_name : "unknown");
         if (digest_driver_info[i].accelerated == AFALG_ACCELERATED)
-	    fprintf (stderr, "(hw accelerated)");
-	else if (digest_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
-	    fprintf(stderr, "(software)");
-	else
-	    fprintf(stderr, "(acceleration status unknown)");
+            fprintf (stderr, "(hw accelerated)");
+        else if (digest_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
+            fprintf(stderr, "(software)");
+        else
+            fprintf(stderr, "(acceleration status unknown)");
         if (digest_driver_info[i].status == AFALG_STATUS_FAILURE)
             fprintf (stderr, ". Digest setup failed.");
         fprintf (stderr, "\n");
@@ -1078,7 +1137,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             memcpy(selected_ciphers, new_list, sizeof(selected_ciphers));
             OPENSSL_free(new_list);
         }
-        rebuild_known_cipher_nids();
+        rebuild_known_cipher_nids(e);
         return 1;
 
     case AFALG_CMD_DIGESTS:
@@ -1097,7 +1156,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             memcpy(selected_digests, new_list, sizeof(selected_digests));
             OPENSSL_free(new_list);
         }
-        rebuild_known_digest_nids();
+        rebuild_known_digest_nids(e);
         return 1;
 
     case AFALG_CMD_DUMP_INFO:
