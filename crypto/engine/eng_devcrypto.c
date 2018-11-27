@@ -365,7 +365,7 @@ static void prepare_cipher_methods(void)
     }
 }
 
-static void rebuild_known_cipher_nids(void)
+static void rebuild_known_cipher_nids(ENGINE *e)
 {
     size_t i;
 
@@ -373,6 +373,8 @@ static void rebuild_known_cipher_nids(void)
         if (devcrypto_test_cipher(i))
             known_cipher_nids[known_cipher_nids_amount++] = cipher_data[i].nid;
     }
+    ENGINE_unregister_ciphers(e);
+    ENGINE_register_ciphers(e);
 }
 
 static const EVP_CIPHER *get_cipher_method(int nid)
@@ -674,7 +676,7 @@ static int devcrypto_test_digest(size_t digest_data_index)
                     && use_softdrivers == DEVCRYPTO_REJECT_SOFTWARE)));
 }
 
-static void rebuild_known_digest_nids(void)
+static void rebuild_known_digest_nids(ENGINE *e)
 {
     size_t i;
 
@@ -682,6 +684,8 @@ static void rebuild_known_digest_nids(void)
         if (devcrypto_test_digest(i))
             known_digest_nids[known_digest_nids_amount++] = digest_data[i].nid;
     }
+    ENGINE_unregister_digests(e);
+    ENGINE_register_digests(e);
 }
 
 static void prepare_digest_methods(void)
@@ -891,9 +895,9 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             return 1;
         use_softdrivers = i;
 #ifdef IMPLEMENT_DIGEST
-        rebuild_known_digest_nids();
+        rebuild_known_digest_nids(e);
 #endif
-        rebuild_known_cipher_nids();
+        rebuild_known_cipher_nids(e);
         return 1;
 #endif /* CIOCGSESSINFO */
 
@@ -913,7 +917,7 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             memcpy(selected_ciphers, new_list, sizeof(selected_ciphers));
             OPENSSL_free(new_list);
         }
-        rebuild_known_cipher_nids();
+        rebuild_known_cipher_nids(e);
         return 1;
 
 #ifdef IMPLEMENT_DIGEST
@@ -933,7 +937,7 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
             memcpy(selected_digests, new_list, sizeof(selected_digests));
             OPENSSL_free(new_list);
         }
-        rebuild_known_digest_nids();
+        rebuild_known_digest_nids(e);
         return 1;
 #endif /* IMPLEMENT_DIGEST */
 
