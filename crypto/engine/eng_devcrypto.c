@@ -249,7 +249,8 @@ afalg_accelerated(const char *driver_name)
 
 struct cipher_ctx {
     int sfd;
-    unsigned int op;
+    unsigned int op, blocksize, num;
+    unsigned char partial[EVP_MAX_BLOCK_LENGTH];
 };
 
 static const struct cipher_data_st {
@@ -352,6 +353,8 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         type = "cipher";
     else
         type = "skcipher";
+    if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
+        cipher_ctx->blocksize = cipher_d->blocksize;
     if ((fd = get_afalg_socket(cipher_d->name, type)) < 0)
         return 0;
 
@@ -413,19 +416,19 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
 
     if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, MSG_MORE)) < 0) {
         perror ("cipher_do_cipher: sendmsg");
-        return 0;
+        return -1;
     } else if (nbytes != (ssize_t) inl) {
         fprintf(stderr, "cipher_do_cipher: sent %zd bytes != inlen %zd\n",
                 nbytes, inl);
-        return 0;
+        return -1;
     }
     if ((nbytes = read(cipher_ctx->sfd, out, inl)) != (ssize_t) inl) {
         fprintf(stderr, "cipher_do_cipher: read %zd bytes != inlen %zd\n",
                 nbytes, inl);
-        return 0;
+        return -1;
     }
 
-    return 1;
+    return nbytes;
 }
 
 static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
@@ -437,15 +440,26 @@ static int cbc_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
     unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
     unsigned char saved_iv[EVP_MAX_IV_LENGTH];
+    int outl;
 
     assert(inl >= ivlen);
     if (!enc)
         memcpy(saved_iv, in + inl - ivlen, ivlen);
-    if (!afalg_do_cipher(cipher_ctx, out, in, inl, enc, iv, ivlen))
-        return 0;
+    if ((outl = afalg_do_cipher(cipher_ctx, out, in, inl, enc, iv, ivlen)) < 1)
+        return outl;
     memcpy(iv, enc ? out + inl - ivlen : saved_iv, ivlen);
 
-    return 1;
+    return outl;
+}
+
+static void ctr_updateiv(unsigned char* iv, size_t ivlen, size_t nblocks)
+{
+    do {
+        ivlen--;
+        nblocks += iv[ivlen];
+        iv[ivlen] = (uint8_t) nblocks;
+        nblocks >>= 8;
+    } while (ivlen);
 }
 
 static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
@@ -454,19 +468,42 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     int enc = EVP_CIPHER_CTX_encrypting(ctx);
-    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    size_t ivlen = EVP_CIPHER_CTX_iv_length(ctx), nblocks, len;
     unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
-    uint32_t n = ivlen, c = 1;
 
-    if (!afalg_do_cipher(cipher_ctx, out, in, inl, enc, iv, ivlen))
-        return 0;
-    /* increment iv */
-    do {
-        --n;
-        c += iv[n];
-        iv[n] = (uint8_t) c;
-	c >>= 8;
-    } while (n);
+    /* handle initial partial block */
+    while (cipher_ctx->num && inl) {
+        (*out++) = *(in++) ^ cipher_ctx->partial[cipher_ctx->num];
+        --inl;
+        cipher_ctx->num = (cipher_ctx->num + 1) % cipher_ctx->blocksize;
+    }
+
+    /* process full blocks */
+    if (inl > (unsigned int) cipher_ctx->blocksize) {
+      nblocks = inl/cipher_ctx->blocksize;
+      len = nblocks * cipher_ctx->blocksize;
+      if (afalg_do_cipher(cipher_ctx, out, in, len, enc, iv, ivlen) < 1)
+          return 0;
+      ctr_updateiv(iv, ivlen, nblocks);
+      inl -= len;
+      out += len;
+      in += len;
+    }
+
+    /* process final partial block */
+    if (inl) {
+        memset(cipher_ctx->partial, 0, cipher_ctx->blocksize);
+        if (afalg_do_cipher(cipher_ctx, cipher_ctx->partial,
+                            cipher_ctx->partial, cipher_ctx->blocksize, enc,
+			    iv, ivlen) < 1)
+            return 0;
+        ctr_updateiv(iv, ivlen, 1);
+        while (inl--) {
+            out[cipher_ctx->num] = in[cipher_ctx->num]
+                ^ cipher_ctx->partial[cipher_ctx->num];
+	    cipher_ctx->num++;
+	}
+    }
 
     return 1;
 }
@@ -541,7 +578,7 @@ static int afalg_test_cipher(size_t cipher_data_index)
 static void prepare_cipher_methods(void)
 {
     size_t i;
-    int fd;
+    int fd, blocksize;
     char *type;
     int (*do_cipher) (EVP_CIPHER_CTX *, unsigned char *, const unsigned char *,
                       size_t);
@@ -572,32 +609,32 @@ static void prepare_cipher_methods(void)
             cipher_driver_info[i].accelerated =
                 afalg_accelerated(cipher_driver_info[i].driver_name);
 
+        blocksize = cipher_data[i].blocksize;
         switch (cipher_data[i].flags & EVP_CIPH_MODE) {
-	case EVP_CIPH_CBC_MODE:
-	    do_cipher = cbc_do_cipher;
-	    break;
+        case EVP_CIPH_CBC_MODE:
+            do_cipher = cbc_do_cipher;
+            break;
         case EVP_CIPH_CTR_MODE:
-	    do_cipher = ctr_do_cipher;
-	    break;
+            do_cipher = ctr_do_cipher;
+            blocksize = 1;
+            break;
         case EVP_CIPH_ECB_MODE:
-	    do_cipher = ecb_do_cipher;
-	    break;
-	default:
+            do_cipher = ecb_do_cipher;
+            break;
+        default:
             cipher_driver_info[i].status = AFALG_STATUS_FAILURE;
             known_cipher_methods[i] = NULL;
-	    continue;
-	}
+            continue;
+        }
 
         if ((known_cipher_methods[i] =
-                 EVP_CIPHER_meth_new(cipher_data[i].nid,
-                                     cipher_data[i].blocksize,
+                 EVP_CIPHER_meth_new(cipher_data[i].nid, blocksize,
                                      cipher_data[i].keylen)) == NULL
             || !EVP_CIPHER_meth_set_iv_length(known_cipher_methods[i],
                                               cipher_data[i].ivlen)
             || !EVP_CIPHER_meth_set_flags(known_cipher_methods[i],
                                           cipher_data[i].flags
                                           | EVP_CIPH_CUSTOM_COPY
-                                          | EVP_CIPH_ALWAYS_CALL_INIT
                                           | EVP_CIPH_FLAG_DEFAULT_ASN1)
             || !EVP_CIPHER_meth_set_init(known_cipher_methods[i], cipher_init)
             || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i], do_cipher)
