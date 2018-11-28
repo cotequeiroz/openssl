@@ -78,10 +78,12 @@ struct driver_info_st {
 
 struct cipher_ctx {
     struct session_op sess;
-
-    /* to pass from init to do_cipher */
-    const unsigned char *iv;
     int op;                      /* COP_ENCRYPT or COP_DECRYPT */
+    unsigned long mode;          /* EVP_CIPH_*_MODE */
+
+    /* to handle ctr mode being a stream cipher */
+    unsigned char partial[EVP_MAX_BLOCK_LENGTH];
+    unsigned int blocksize, num;
 };
 
 static const struct cipher_data_st {
@@ -108,7 +110,8 @@ static const struct cipher_data_st {
 #ifndef OPENSSL_NO_RC4
     { NID_rc4, 1, 16, 0, EVP_CIPH_STREAM_CIPHER, CRYPTO_ARC4 },
 #endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR)
+#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR) \
+    && defined(COP_FLAG_WRITE_IV)
     { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
     { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
     { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
@@ -186,6 +189,8 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     cipher_ctx->sess.keylen = cipher_d->keylen;
     cipher_ctx->sess.key = (void *)key;
     cipher_ctx->op = enc ? COP_ENCRYPT : COP_DECRYPT;
+    cipher_ctx->mode = cipher_d->flags & EVP_CIPH_MODE;
+    cipher_ctx->blocksize = cipher_d->blocksize;
     if (ioctl(cfd, CIOCGSESSION, &cipher_ctx->sess) < 0) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
@@ -202,6 +207,9 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     struct crypt_op cryp;
 #if !defined(COP_FLAG_WRITE_IV)
     unsigned char saved_iv[EVP_MAX_IV_LENGTH];
+    const unsigned char *ivptr;
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+    size_t nblocks, ivlen;
 #endif
 
     memset(&cryp, 0, sizeof(cryp));
@@ -209,17 +217,17 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     cryp.len = inl;
     cryp.src = (void *)in;
     cryp.dst = (void *)out;
-    cryp.iv = (void *)EVP_CIPHER_CTX_iv_noconst(ctx);
+    cryp.iv = (void *)iv;
     cryp.op = cipher_ctx->op;
 #if !defined(COP_FLAG_WRITE_IV)
     cryp.flags = 0;
 
-    if (EVP_CIPHER_CTX_iv_length(ctx) > 0) {
-        assert(inl >= EVP_CIPHER_CTX_iv_length(ctx));
+    ivlen = EVP_CIPHER_CTX_iv_length(ctx);
+    if (ivlen > 0 && cipher_ctx->mode == EVP_CIPH_CBC_MODE) {
+        assert(inl >= ivlen);
         if (!EVP_CIPHER_CTX_encrypting(ctx)) {
-            unsigned char *ivptr = in + inl - EVP_CIPHER_CTX_iv_length(ctx);
-
-            memcpy(saved_iv, ivptr, EVP_CIPHER_CTX_iv_length(ctx));
+            ivptr = in + inl - ivlen;
+            memcpy(saved_iv, ivptr, ivlen);
         }
     }
 #else
@@ -233,16 +241,76 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
 #if !defined(COP_FLAG_WRITE_IV)
     if (EVP_CIPHER_CTX_iv_length(ctx) > 0) {
-        unsigned char *ivptr = saved_iv;
+        switch(cipher_ctx->mode) {
+        case EVP_CIPH_CBC_MODE:
+            assert(inl >= ivlen);
+            if (!EVP_CIPHER_CTX_encrypting(ctx))
+                ivptr = out + inl - EVP_CIPHER_CTX_iv_length(ctx);
 
-        assert(inl >= EVP_CIPHER_CTX_iv_length(ctx));
-        if (!EVP_CIPHER_CTX_encrypting(ctx))
-            ivptr = out + inl - EVP_CIPHER_CTX_iv_length(ctx);
+            memcpy(iv, ivptr, ivlen);
+            break;
 
-        memcpy(EVP_CIPHER_CTX_iv_noconst(ctx), ivptr,
-               EVP_CIPHER_CTX_iv_length(ctx));
+        case EVP_CIPH_CTR_MODE:
+            nblocks = (inl + cipher_ctx->blocksize - 1)
+                      / cipher_ctx->blocksize;
+            do {
+                ivlen--;
+                nblocks += iv[ivlen];
+                iv[ivlen] = (uint8_t) nblocks;
+                nblocks >>= 8;
+            } while (ivlen);
+            break;
+
+        case EVP_CIPH_ECB_MODE:
+        case EVP_CIPH_STREAM_CIPHER:
+            break;
+
+        default: /* should not happen */
+            return 0;
+        }
     }
 #endif
+
+    return 1;
+}
+
+static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                         const unsigned char *in, size_t inl)
+{
+    struct cipher_ctx *cipher_ctx =
+        (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    size_t nblocks, len;
+
+    /* initial partial block */
+    while (cipher_ctx->num && inl) {
+        (*out++) = *(in++) ^ cipher_ctx->partial[cipher_ctx->num];
+        --inl;
+        cipher_ctx->num = (cipher_ctx->num + 1) % cipher_ctx->blocksize;
+    }
+
+    /* full blocks */
+    if (inl > (unsigned int) cipher_ctx->blocksize) {
+        nblocks = inl/cipher_ctx->blocksize;
+        len = nblocks * cipher_ctx->blocksize;
+        if (cipher_do_cipher(ctx, out, in, len) < 1)
+            return 0;
+        inl -= len;
+        out += len;
+        in += len;
+    }
+
+    /* final partial block */
+    if (inl) {
+        memset(cipher_ctx->partial, 0, cipher_ctx->blocksize);
+        if (cipher_do_cipher(ctx, cipher_ctx->partial, cipher_ctx->partial,
+            cipher_ctx->blocksize) < 1)
+            return 0;
+        while (inl--) {
+            out[cipher_ctx->num] = in[cipher_ctx->num]
+                                   ^ cipher_ctx->partial[cipher_ctx->num];
+            cipher_ctx->num++;
+        }
+    }
 
     return 1;
 }
@@ -308,6 +376,7 @@ static void prepare_cipher_methods(void)
 #ifdef CIOCGSESSINFO
     struct session_info_op siop;
 #endif
+    unsigned long cipher_mode;
 
     memset(&cipher_driver_info, 0, sizeof(cipher_driver_info));
 
@@ -327,10 +396,12 @@ static void prepare_cipher_methods(void)
             cipher_driver_info[i].status = DEVCRYPTO_STATUS_NO_CIOCGSESSION;
             continue;
         }
+        cipher_mode = cipher_data[i].flags & EVP_CIPH_MODE;
 
         if ((known_cipher_methods[i] =
                  EVP_CIPHER_meth_new(cipher_data[i].nid,
-                                     cipher_data[i].blocksize,
+                                     cipher_mode == EVP_CIPH_CTR_MODE ? 1 :
+                                                    cipher_data[i].blocksize,
                                      cipher_data[i].keylen)) == NULL
             || !EVP_CIPHER_meth_set_iv_length(known_cipher_methods[i],
                                               cipher_data[i].ivlen)
@@ -340,6 +411,8 @@ static void prepare_cipher_methods(void)
                                           | EVP_CIPH_FLAG_DEFAULT_ASN1)
             || !EVP_CIPHER_meth_set_init(known_cipher_methods[i], cipher_init)
             || !EVP_CIPHER_meth_set_do_cipher(known_cipher_methods[i],
+                                     cipher_mode == EVP_CIPH_CTR_MODE ?
+                                              ctr_do_cipher :
                                               cipher_do_cipher)
             || !EVP_CIPHER_meth_set_ctrl(known_cipher_methods[i], cipher_ctrl)
             || !EVP_CIPHER_meth_set_cleanup(known_cipher_methods[i],
