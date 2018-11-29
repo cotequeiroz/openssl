@@ -28,6 +28,20 @@
 
 #include "internal/engine.h"
 
+#define AFALG_REQUIRE_ACCELERATED 0 /* require confirmation of acceleration */
+#define AFALG_USE_SOFTWARE        1 /* allow software drivers */
+#define AFALG_REJECT_SOFTWARE     2 /* only disallow confirmed software drivers */
+
+#define STR_(S) #S
+#define STR(S)  STR_(S)
+
+static int use_softdrivers = AFALG_REJECT_SOFTWARE;
+
+/*
+ * cipher/digest status & acceleration definitions
+ * Make sure the defaults are set to 0
+ */
+
 struct driver_info_st {
     enum afalg_status_t {
         AFALG_STATUS_FAILURE       = -3, /* unusable for other reason */
@@ -284,21 +298,24 @@ static const struct cipher_data_st {
     { NID_aes_128_xts, 16, 128 / 8 * 2, 16, EVP_CIPH_XTS_MODE, "xts(aes)" },
     { NID_aes_256_xts, 16, 256 / 8 * 2, 16, EVP_CIPH_XTS_MODE, "xts(aes)" },
 #endif
-    { NID_aes_128_ecb, 16, 128 / 8, 16, EVP_CIPH_ECB_MODE, "ecb(aes)" },
-    { NID_aes_192_ecb, 16, 192 / 8, 16, EVP_CIPH_ECB_MODE, "ecb(aes)" },
-    { NID_aes_256_ecb, 16, 256 / 8, 16, EVP_CIPH_ECB_MODE, "ecb(aes)" },
+    { NID_aes_128_ecb, 16, 128 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)" },
+    { NID_aes_192_ecb, 16, 192 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)" },
+    { NID_aes_256_ecb, 16, 256 / 8, 0, EVP_CIPH_ECB_MODE, "ecb(aes)" },
 #if 0                            /* Not yet supported */
     { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, "gcm(aes)" },
     { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, "gcm(aes)" },
     { NID_aes_256_gcm, 16, 256 / 8, 16, EVP_CIPH_GCM_MODE, "gcm(aes)" },
 #endif
 #ifndef OPENSSL_NO_CAMELLIA
-    { NID_camellia_128_cbc, 16, 128 / 8, 16, EVP_CIPH_CBC_MODE,
+    { NID_camellia_128_cbc, 16, 128 / 8, 8, EVP_CIPH_CBC_MODE,
       "cbc(camellia)" },
-    { NID_camellia_192_cbc, 16, 192 / 8, 16, EVP_CIPH_CBC_MODE,
+    { NID_camellia_192_cbc, 16, 192 / 8, 8, EVP_CIPH_CBC_MODE,
       "cbc(camellia)" },
-    { NID_camellia_256_cbc, 16, 256 / 8, 16, EVP_CIPH_CBC_MODE,
+    { NID_camellia_256_cbc, 16, 256 / 8, 8, EVP_CIPH_CBC_MODE,
       "cbc(camellia)" },
+#endif
+#ifndef OPENSSL_NO_CHACHA
+    { NID_chacha20, 16, 256/8, 16, EVP_CIPH_CTR_MODE, "chacha20" },
 #endif
 };
 
@@ -345,17 +362,12 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
-    char *type;
     int fd;
 
     cipher_ctx->sfd = -1;
-    if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_STREAM_CIPHER)
-        type = "cipher";
-    else
-        type = "skcipher";
     if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
         cipher_ctx->blocksize = cipher_d->blocksize;
-    if ((fd = get_afalg_socket(cipher_d->name, type)) < 0)
+    if ((fd = get_afalg_socket(cipher_d->name, "skcipher")) < 0)
         return 0;
 
     cipher_ctx->op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
@@ -571,15 +583,20 @@ static struct driver_info_st cipher_driver_info[OSSL_NELEM(cipher_data)];
 
 static int afalg_test_cipher(size_t cipher_data_index)
 {
-    return cipher_driver_info[cipher_data_index].status == AFALG_STATUS_USABLE
-            && selected_ciphers[cipher_data_index] == 1;
+    return (cipher_driver_info[cipher_data_index].status == AFALG_STATUS_USABLE
+            && selected_ciphers[cipher_data_index] == 1
+            && (cipher_driver_info[cipher_data_index].accelerated
+                    == AFALG_ACCELERATED
+                || use_softdrivers == AFALG_USE_SOFTWARE
+                || (cipher_driver_info[cipher_data_index].accelerated
+                        != AFALG_NOT_ACCELERATED
+                    && use_softdrivers == AFALG_REJECT_SOFTWARE)));
 }
 
 static void prepare_cipher_methods(void)
 {
     size_t i;
     int fd, blocksize;
-    char *type;
     int (*do_cipher) (EVP_CIPHER_CTX *, unsigned char *, const unsigned char *,
                       size_t);
 
@@ -590,11 +607,7 @@ static void prepare_cipher_methods(void)
         /*
          * Check that the cipher is usable
          */
-        if ((cipher_data[i].flags & EVP_CIPH_MODE) == EVP_CIPH_STREAM_CIPHER)
-            type = "cipher";
-        else
-            type = "skcipher";
-        if ((fd = get_afalg_socket(cipher_data[i].name, type)) < 0) {
+        if ((fd = get_afalg_socket(cipher_data[i].name, "skcipher")) < 0) {
             cipher_driver_info[i].status = AFALG_STATUS_NO_OPEN;
             continue;
         }
@@ -804,7 +817,6 @@ static const struct digest_data_st {
     { NID_sha256, 256 / 8, "sha256" },
     { NID_sha384, 384 / 8, "sha384" },
     { NID_sha512, 512 / 8, "sha512" },
-    { NID_blake2b512, 512 / 8 , "blake2b512" }
 };
 
 static size_t find_digest_data_index(int nid)
@@ -958,8 +970,14 @@ static struct driver_info_st digest_driver_info[OSSL_NELEM(digest_data)];
 
 static int afalg_test_digest(size_t digest_data_index)
 {
-    return digest_driver_info[digest_data_index].status == AFALG_STATUS_USABLE
-        && selected_digests[digest_data_index] == 1;
+    return (digest_driver_info[digest_data_index].status == AFALG_STATUS_USABLE
+            && selected_digests[digest_data_index] == 1
+            && (digest_driver_info[digest_data_index].accelerated
+                    == AFALG_ACCELERATED
+                || use_softdrivers == AFALG_USE_SOFTWARE
+                || (digest_driver_info[digest_data_index].accelerated
+                        != AFALG_NOT_ACCELERATED
+                    && use_softdrivers == AFALG_REJECT_SOFTWARE)));
 }
 
 static void rebuild_known_digest_nids(ENGINE *e)
@@ -1130,11 +1148,19 @@ static void dump_digest_info(void)
  *
  *****/
 
-#define AFALG_CMD_CIPHERS (ENGINE_CMD_BASE)
-#define AFALG_CMD_DIGESTS (ENGINE_CMD_BASE + 1)
-#define AFALG_CMD_DUMP_INFO (ENGINE_CMD_BASE + 2)
+#define AFALG_CMD_USE_SOFTDRIVERS  ENGINE_CMD_BASE
+#define AFALG_CMD_CIPHERS         (ENGINE_CMD_BASE + 1)
+#define AFALG_CMD_DIGESTS         (ENGINE_CMD_BASE + 2)
+#define AFALG_CMD_DUMP_INFO       (ENGINE_CMD_BASE + 3)
 
 static const ENGINE_CMD_DEFN afalg_cmds[] = {
+    {AFALG_CMD_USE_SOFTDRIVERS,
+    "USE_SOFTDRIVERS",
+    "specifies whether to use software (not accelerated) drivers (" STR(AFALG_REQUIRE_ACCELERATED)
+        "=use only accelerated drivers, " STR(AFALG_USE_SOFTWARE) "=allow all drivers, "
+        STR(AFALG_REJECT_SOFTWARE) "=use if acceleration can't be determined [default=2])",
+    ENGINE_CMD_FLAG_NUMERIC},
+
     {AFALG_CMD_CIPHERS,
      "CIPHERS",
      "either ALL, NONE, or a comma-separated list of ciphers to enable [default=ALL]",
@@ -1158,6 +1184,23 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
     int *new_list;
 
     switch(cmd) {
+    case AFALG_CMD_USE_SOFTDRIVERS:
+        switch(i) {
+        case AFALG_REQUIRE_ACCELERATED:
+        case AFALG_USE_SOFTWARE:
+        case AFALG_REJECT_SOFTWARE:
+            break;
+        default:
+            fprintf(stderr, "devcrypto: invalid value (%ld) for USE_SOFTDRIVERS\n", i);
+            return 0;
+        }
+        if (use_softdrivers == i)
+            return 1;
+        use_softdrivers = i;
+        rebuild_known_digest_nids(e);
+        rebuild_known_cipher_nids(e);
+        return 1;
+
     case AFALG_CMD_CIPHERS:
         if (p == NULL)
             return 1;
