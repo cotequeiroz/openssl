@@ -314,9 +314,6 @@ static const struct cipher_data_st {
     { NID_camellia_256_cbc, 16, 256 / 8, 8, EVP_CIPH_CBC_MODE,
       "cbc(camellia)" },
 #endif
-#ifndef OPENSSL_NO_CHACHA
-    { NID_chacha20, 16, 256/8, 16, EVP_CIPH_CTR_MODE, "chacha20" },
-#endif
 };
 
 static size_t find_cipher_data_index(int nid)
