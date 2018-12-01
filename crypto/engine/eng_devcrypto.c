@@ -110,8 +110,7 @@ static const struct cipher_data_st {
 #ifndef OPENSSL_NO_RC4
     { NID_rc4, 1, 16, 0, EVP_CIPH_STREAM_CIPHER, CRYPTO_ARC4 },
 #endif
-#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR) \
-    && defined(COP_FLAG_WRITE_IV)
+#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_AES_CTR)
     { NID_aes_128_ctr, 16, 128 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
     { NID_aes_192_ctr, 16, 192 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
     { NID_aes_256_ctr, 16, 256 / 8, 16, EVP_CIPH_CTR_MODE, CRYPTO_AES_CTR },
@@ -205,10 +204,10 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     struct crypt_op cryp;
+    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
 #if !defined(COP_FLAG_WRITE_IV)
     unsigned char saved_iv[EVP_MAX_IV_LENGTH];
     const unsigned char *ivptr;
-    unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
     size_t nblocks, ivlen;
 #endif
 
@@ -244,8 +243,10 @@ static int cipher_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         switch(cipher_ctx->mode) {
         case EVP_CIPH_CBC_MODE:
             assert(inl >= ivlen);
-            if (!EVP_CIPHER_CTX_encrypting(ctx))
-                ivptr = out + inl - EVP_CIPHER_CTX_iv_length(ctx);
+            if (EVP_CIPHER_CTX_encrypting(ctx))
+                ivptr = out + inl - ivlen;
+            else
+                ivptr = saved_iv;
 
             memcpy(iv, ivptr, ivlen);
             break;
