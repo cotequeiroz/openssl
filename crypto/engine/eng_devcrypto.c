@@ -421,7 +421,7 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
 
-    if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, MSG_MORE)) < 0) {
+    if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
         perror ("cipher_do_cipher: sendmsg");
         return -1;
     } else if (nbytes != (ssize_t) inl) {
