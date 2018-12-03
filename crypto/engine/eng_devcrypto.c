@@ -7,6 +7,14 @@
  * https://www.openssl.org/source/license.html
  */
 
+#ifdef ALG_ZERO_COPY
+/* Required for vmsplice */
+# ifndef _GNU_SOURCE
+#  define _GNU_SOURCE
+# endif
+#include <sys/uio.h>
+#endif
+
 #include "e_os.h"
 #include <string.h>
 #include <sys/socket.h>
@@ -81,6 +89,17 @@ static int get_afalg_socket(const char *salg_name, const char *salg_type)
     close(fd);
     return -1;
 }
+
+static int afalg_closefd(int fd)
+{
+    int ret;
+
+    if (fd < 0 || (ret = close(fd)) == 0)
+        return 0;
+    SYSerr(SYS_F_CLOSE, errno);
+    return ret;
+}
+
 
 static int afalg_get_driver_name(const char *algo_name, char *driver_name,
                                  size_t driver_len)
@@ -263,6 +282,9 @@ afalg_accelerated(const char *driver_name)
 
 struct cipher_ctx {
     int bfd, sfd;
+#ifdef ALG_ZERO_COPY
+    int pipes[2];
+#endif
     unsigned int op, blocksize, num;
     unsigned char partial[EVP_MAX_BLOCK_LENGTH];
 };
@@ -371,10 +393,14 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     if ((key == NULL
          || setsockopt(cipher_ctx->bfd, SOL_ALG, ALG_SET_KEY, key,
                        EVP_CIPHER_CTX_key_length(ctx)) >= 0)
-        && (cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) != -1) {
+        && (cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) != -1
+#ifdef ALG_ZERO_COPY
+        && pipe(cipher_ctx->pipes) == 0
+#endif
+        )
         return 1;
-    }
 
+    fprintf(stderr, "Init Failed\n");
     close(cipher_ctx->bfd);
     if (cipher_ctx->sfd > -1)
         close(cipher_ctx->sfd);
@@ -393,6 +419,11 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     char buf[CMSG_SPACE(sizeof(cipher_ctx->op))
              + CMSG_SPACE(offsetof(struct af_alg_iv, iv) + EVP_MAX_IV_LENGTH)];
     ssize_t nbytes;
+    size_t len;
+#ifdef ALG_ZERO_COPY
+    size_t pagesize;
+    int use_zc;
+#endif
 
     memset(&buf, 0, sizeof(buf));
     msg.msg_control = buf;
@@ -418,17 +449,38 @@ static int afalg_do_cipher(struct cipher_ctx *cipher_ctx, unsigned char *out,
     iov.iov_base = (void *)in;
     iov.iov_len = inl;
 
+#ifdef ALG_ZERO_COPY
+    pagesize=(size_t) sysconf(_SC_PAGESIZE);
+    if ((use_zc = (inl <= (size_t) pagesize * 16) && ((size_t)in % pagesize == 0))) {
+        msg.msg_iov = NULL;
+        msg.msg_iovlen = 0;
+        len = 0;
+    } else {
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        len = inl;
+    }
+#else
+    len = inl;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-
+#endif
     if ((nbytes = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
         perror ("cipher_do_cipher: sendmsg");
         return -1;
-    } else if (nbytes != (ssize_t) inl) {
-        fprintf(stderr, "cipher_do_cipher: sent %zd bytes != inlen %zd\n",
-                nbytes, inl);
+    } else if (nbytes != (ssize_t) len) {
+        fprintf(stderr, "cipher_do_cipher: sent %zd bytes != len %zd\n",
+                nbytes, len);
         return -1;
     }
+
+#ifdef ALG_ZERO_COPY
+    if (use_zc &&
+        (vmsplice(cipher_ctx->pipes[1], &iov, 1, SPLICE_F_GIFT) < 0
+         || splice(cipher_ctx->pipes[0], NULL, cipher_ctx->sfd, NULL, inl, 0) < 0))
+        return 0;
+#endif
+
     if ((nbytes = read(cipher_ctx->sfd, out, inl)) != (ssize_t) inl) {
         fprintf(stderr, "cipher_do_cipher: read %zd bytes != inlen %zd\n",
                 nbytes, inl);
@@ -502,14 +554,14 @@ static int ctr_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         memset(cipher_ctx->partial, 0, cipher_ctx->blocksize);
         if (afalg_do_cipher(cipher_ctx, cipher_ctx->partial,
                             cipher_ctx->partial, cipher_ctx->blocksize, enc,
-			    iv, ivlen) < 1)
+                            iv, ivlen) < 1)
             return 0;
         ctr_updateiv(iv, ivlen, 1);
         while (inl--) {
             out[cipher_ctx->num] = in[cipher_ctx->num]
                 ^ cipher_ctx->partial[cipher_ctx->num];
-	    cipher_ctx->num++;
-	}
+            cipher_ctx->num++;
+        }
     }
 
     return 1;
@@ -536,12 +588,22 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
     to = (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(
             (EVP_CIPHER_CTX *)p2);
 
-    to->sfd = -1;
-    if ((to->sfd = accept(from->sfd, NULL, 0)) != -1)
+    to->bfd = to->sfd = -1;
+#ifdef ALG_ZERO_COPY
+    if (pipe(to->pipes) != 0)
+        return 0;
+#endif
+    if ((to->bfd = accept(from->bfd, NULL, 0)) != -1
+        && (to->sfd = accept(to->bfd, NULL, 0)) != -1)
         return 1;
 
     SYSerr(SYS_F_ACCEPT, errno);
-    to->sfd = -1;
+#ifdef ALG_ZERO_COPY
+    close(to->pipes[0]);
+    close(to->pipes[1]);
+#endif
+    if (to->bfd >= 0)
+        close(to->bfd);
 
     return 0;
 }
@@ -550,19 +612,18 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
-    int ret = 1;
+    int ret;
 
     if (cipher_ctx == NULL)
         return 1;
 
-    if (cipher_ctx->sfd >= 0 && close(cipher_ctx->sfd) != 0) {
-        SYSerr(SYS_F_CLOSE, errno);
-        ret = 0;
-    }
-    if (cipher_ctx->bfd >= 0 && close(cipher_ctx->bfd) != 0) {
-        SYSerr(SYS_F_CLOSE, errno);
-        ret = 0;
-    }
+    ret = !(0
+#ifdef ALG_ZERO_COPY
+            | afalg_closefd(cipher_ctx->pipes[0])
+            | afalg_closefd(cipher_ctx->pipes[1])
+#endif
+            | afalg_closefd(cipher_ctx->sfd)
+            | afalg_closefd(cipher_ctx->bfd));
 
     cipher_ctx->bfd = cipher_ctx->sfd = -1;
     return ret;
@@ -799,6 +860,9 @@ struct digest_ctx {
     /* This signals that the init function was called, not that it succeeded. */
     int init_called;
     int bfd, sfd;
+#ifdef ALG_ZERO_COPY
+    int pipes[2];
+#endif
 };
 
 static const struct digest_data_st {
@@ -868,7 +932,11 @@ static int digest_init(EVP_MD_CTX *ctx)
     if ((digest_ctx->bfd =
         get_afalg_socket(digest_d->name, "hash")) < 0)
         return 0;
-    if ((digest_ctx->sfd = accept(digest_ctx->bfd, NULL, 0)) >= 0)
+    if ((digest_ctx->sfd = accept(digest_ctx->bfd, NULL, 0)) >= 0
+#ifdef ALG_ZERO_COPY
+        && pipe(digest_ctx->pipes) == 0
+#endif
+        )
         return 1;
     close(digest_ctx->bfd);
     digest_ctx->bfd = -1;
@@ -880,6 +948,10 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
     int flags = 0;
+#ifdef ALG_ZERO_COPY
+    struct iovec iov;
+    size_t pagesize;
+#endif
 
     if (count == 0)
         return 1;
@@ -887,12 +959,30 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     if (digest_ctx == NULL)
         return 0;
 
-    if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
-        flags = MSG_MORE;
+#ifdef ALG_ZERO_COPY
+    pagesize=(size_t) sysconf(_SC_PAGESIZE);
+    if (count <= (size_t) pagesize * 16
+        && (size_t)data % pagesize == 0) {
+        iov.iov_base = (void *)data;
+        iov.iov_len = count;
 
-    if (send(digest_ctx->sfd, data, count, flags) == (ssize_t)count)
-        return 1;
+        if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+            flags = SPLICE_F_MORE;
 
+        if (vmsplice(digest_ctx->pipes[1], &iov, 1, flags | SPLICE_F_GIFT) >=0
+            && splice(digest_ctx->pipes[0], NULL, digest_ctx->sfd, NULL,
+                      count, flags) >0)
+            return 1;
+    }
+    else
+#endif
+    {
+        if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
+            flags = MSG_MORE;
+
+        if (send(digest_ctx->sfd, data, count, flags) == (ssize_t)count)
+            return 1;
+    }
     return 0;
 }
 
@@ -905,9 +995,10 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     if (md == NULL || digest_ctx == NULL)
         return 0;
 
-    if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT) &&
-        (send(digest_ctx->sfd, NULL, 0, 0) < 0))
+    if (!EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)
+        && send(digest_ctx->sfd, NULL, 0, 0) < 0)
         return 0;
+
     if (recv(digest_ctx->sfd, md, len, 0) != len)
         return 0;
 
@@ -924,12 +1015,20 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
     if (digest_from == NULL || digest_from->init_called != 1)
         return 1;
 
+#ifdef ALG_ZERO_COPY
+    if (pipe(digest_to->pipes) != 0)
+        return 0;
+#endif
     digest_to->sfd = digest_to->bfd = -1;
     if((digest_to->bfd = accept(digest_from->bfd, NULL, 0)) != -1
        && (digest_to->sfd = accept(digest_from->sfd, NULL, 0)) != -1)
         return 1;
 
     SYSerr(SYS_F_ACCEPT, errno);
+#ifdef ALG_ZERO_COPY
+    close(digest_to->pipes[0]);
+    close(digest_to->pipes[1]);
+#endif
     if (digest_to->bfd != -1)
         close(digest_to->bfd);
     digest_to->sfd = digest_to->bfd = -1;
@@ -940,20 +1039,17 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
-    int ret=1;
 
     if (digest_ctx == NULL || digest_ctx->init_called != 1)
         return 1;
 
-    if (digest_ctx->bfd >= 0 && close(digest_ctx->bfd) != 0) {
-        ret = 0;
-    }
-
-    if (digest_ctx->sfd >= 0 && close(digest_ctx->sfd) != 0) {
-        ret = 0;
-    }
-
-    return ret;
+    return !(0
+#ifdef ALG_ZERO_COPY
+             | afalg_closefd(digest_ctx->pipes[0])
+             | afalg_closefd(digest_ctx->pipes[1])
+#endif
+             | afalg_closefd(digest_ctx->sfd)
+             | afalg_closefd(digest_ctx->bfd));
 }
 
 /*
