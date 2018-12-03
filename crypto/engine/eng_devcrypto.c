@@ -262,7 +262,7 @@ afalg_accelerated(const char *driver_name)
  *****/
 
 struct cipher_ctx {
-    int sfd;
+    int bfd, sfd;
     unsigned int op, blocksize, num;
     unsigned char partial[EVP_MAX_BLOCK_LENGTH];
 };
@@ -359,25 +359,23 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     const struct cipher_data_st *cipher_d =
         get_cipher_data(EVP_CIPHER_CTX_nid(ctx));
-    int fd;
 
     cipher_ctx->sfd = -1;
     if (EVP_CIPHER_CTX_mode(ctx) == EVP_CIPH_CTR_MODE)
         cipher_ctx->blocksize = cipher_d->blocksize;
-    if ((fd = get_afalg_socket(cipher_d->name, "skcipher")) < 0)
+    if ((cipher_ctx->bfd = get_afalg_socket(cipher_d->name, "skcipher")) < 0)
         return 0;
 
     cipher_ctx->op = enc ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
 
     if ((key == NULL
-         || setsockopt(fd, SOL_ALG, ALG_SET_KEY, key,
+         || setsockopt(cipher_ctx->bfd, SOL_ALG, ALG_SET_KEY, key,
                        EVP_CIPHER_CTX_key_length(ctx)) >= 0)
-        && (cipher_ctx->sfd = accept(fd, NULL, 0)) != -1) {
-        close(fd);
+        && (cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) != -1) {
         return 1;
     }
 
-    close(fd);
+    close(cipher_ctx->bfd);
     if (cipher_ctx->sfd > -1)
         close(cipher_ctx->sfd);
     cipher_ctx->sfd = -1;
@@ -552,17 +550,22 @@ static int cipher_cleanup(EVP_CIPHER_CTX *ctx)
 {
     struct cipher_ctx *cipher_ctx =
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
+    int ret = 1;
 
     if (cipher_ctx == NULL)
         return 1;
 
     if (cipher_ctx->sfd >= 0 && close(cipher_ctx->sfd) != 0) {
         SYSerr(SYS_F_CLOSE, errno);
-        return 0;
+        ret = 0;
+    }
+    if (cipher_ctx->bfd >= 0 && close(cipher_ctx->bfd) != 0) {
+        SYSerr(SYS_F_CLOSE, errno);
+        ret = 0;
     }
 
-    cipher_ctx->sfd = -1;
-    return 1;
+    cipher_ctx->bfd = cipher_ctx->sfd = -1;
+    return ret;
 }
 
 /*
