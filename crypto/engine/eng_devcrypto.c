@@ -1238,7 +1238,7 @@ static int bind_devcrypto(ENGINE *e) {
         );
 }
 
-#ifndef OPENSSL_DEVCRYPTO_DYNAMIC
+#ifdef OPENSSL_NO_DEVCRYPTOENG_DYNAMIC
 /*
  * In case this engine is built into libcrypto, then it doesn't offer any
  * ability to be dynamically loadable.
