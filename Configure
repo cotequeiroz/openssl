@@ -1586,8 +1586,6 @@ unless ($disabled{afalgeng}) {
 
 push @{$config{openssl_feature_defines}}, "OPENSSL_NO_AFALGENG" if ($disabled{afalgeng});
 
-push @{$config{openssl_feature_defines}}, "OPENSSL_NO_DEVCRYPTOENG_DYNAMIC" if ($disabled{"devcryptoeng-dynamic"});
-
 unless ($disabled{ktls}) {
     $config{ktls}="";
     if ($target =~ m/^linux/) {
