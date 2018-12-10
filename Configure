@@ -1202,8 +1202,7 @@ foreach my $what (sort keys %disabled) {
 
     if (!grep { $what eq $_ } ( 'dso', 'threads', 'shared', 'pic',
                                 'dynamic-engine', 'makedepend',
-                                'zlib-dynamic', 'zlib', 'sse2',
-                                'devcryptoeng-dynamic' )) {
+                                'zlib-dynamic', 'zlib', 'sse2' )) {
         (my $WHAT = uc $what) =~ s|-|_|g;
         my $skipdir = $what;
 
