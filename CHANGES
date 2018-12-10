@@ -9,6 +9,10 @@
 
  Changes between 1.1.1 and 3.0.0 [xx XXX xxxx]
 
+  *) Add option to build devcrypto egine as a dynamic engine.  Enable by
+     configuring with enable-devcryptoeng-dynamic.
+     [Eneas U de Queiroz]
+
   *) Move strictness check from EVP_PKEY_asn1_new() to EVP_PKEY_asn1_add0().
      [Richard Levitte]
 
@@ -43,10 +47,6 @@
      'dist' target has fallen out of use, and it shouldn't be
      necessary to configure just to create a source distribution.
      [Richard Levitte]
-
-  *) Add option to build devcrypto egine as a dynamic engine.  Enable by
-     configuring with enable-devcryptoeng-dynamic.
-     [Eneas U de Queiroz]
 
   *) Recreate the OS390-Unix config target.  It no longer relies on a
      special script like it did for OpenSSL pre-1.1.0.
