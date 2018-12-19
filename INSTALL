@@ -340,9 +340,6 @@
                    on BSD implementations, in which case it can be disabled with
                    no-devcryptoeng.
 
-  enable-devcryptoeng-dynamic
-                   Build the /dev/crypto engine to be dynamically loaded.
-
   no-dso
                    Don't build support for loading Dynamic Shared Objects.
 
