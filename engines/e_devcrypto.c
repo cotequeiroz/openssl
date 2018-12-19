@@ -7,7 +7,7 @@
  * https://www.openssl.org/source/license.html
  */
 
-#include "e_os.h"
+#include "../e_os.h"
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -22,8 +22,6 @@
 #include <openssl/engine.h>
 #include <openssl/objects.h>
 #include <crypto/cryptodev.h>
-
-#include "internal/engine.h"
 
 /* #define ENGINE_DEVCRYPTO_DEBUG */
 
@@ -67,6 +65,10 @@ struct driver_info_st {
 
     char *driver_name;
 };
+
+#ifdef OPENSSL_NO_DYNAMIC_ENGINE
+void engine_load_devcrypto_int(void);
+#endif
 
 /******************************************************************************
  *
@@ -1238,12 +1240,12 @@ static int bind_devcrypto(ENGINE *e) {
         );
 }
 
-#ifdef OPENSSL_NO_DEVCRYPTOENG_DYNAMIC
+#ifdef OPENSSL_NO_DYNAMIC_ENGINE
 /*
  * In case this engine is built into libcrypto, then it doesn't offer any
  * ability to be dynamically loadable.
  */
-void engine_load_devcrypto_int()
+void engine_load_devcrypto_int(void)
 {
     ENGINE *e = NULL;
 

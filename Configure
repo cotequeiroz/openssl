@@ -345,7 +345,6 @@ my @disablables = (
     "deprecated",
     "des",
     "devcryptoeng",
-    "devcryptoeng-dynamic",
     "dgram",
     "dh",
     "dsa",
@@ -436,7 +435,6 @@ our %disabled = ( # "what"         => "comment"
 		  "crypto-mdebug"       => "default",
 		  "crypto-mdebug-backtrace" => "default",
 		  "devcryptoeng"	=> "default",
-		  "devcryptoeng-dynamic" => "default",
 		  "ec_nistp_64_gcc_128" => "default",
 		  "egd"                 => "default",
 		  "external-tests"	=> "default",
@@ -483,13 +481,11 @@ my @disable_cascades = (
 
     # Without DSO, we can't load dynamic engines, so don't build them dynamic
     "dso"               => [ "dynamic-engine" ],
-    "dynamic-engine"    => [ "devcryptoeng-dynamic" ],
 
     # Without position independent code, there can be no shared libraries or DSOs
     "pic"               => [ "shared" ],
     "shared"            => [ "dynamic-engine" ],
     "engine"            => [ "afalgeng", "devcryptoeng" ],
-    "devcryptoeng"      => [ "devcryptoeng-dynamic" ],
 
     # no-autoalginit is only useful when building non-shared
     "autoalginit"       => [ "shared", "apps" ],
@@ -739,10 +735,6 @@ while (@argvcopy)
                 elsif ($1 eq "dynamic-engine")
                         {
                         delete $disabled{"dynamic-engine"};
-                        }
-                elsif ($1 eq "devcryptoeng-dynamic")
-                        {
-                        delete $disabled{"devcryptoeng"};
                         }
                 elsif ($1 eq "zlib-dynamic")
                         {
