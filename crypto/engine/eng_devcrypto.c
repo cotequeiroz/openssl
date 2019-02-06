@@ -24,9 +24,11 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <assert.h>
+#include <asm/types.h>
 #include <linux/cryptouser.h>
 #include <linux/if_alg.h>
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 
 #include <openssl/conf.h>
 #include <openssl/evp.h>
@@ -101,173 +103,186 @@ static int afalg_closefd(int fd)
 }
 
 
-static int afalg_get_driver_name(const char *algo_name, char *driver_name,
-                                 size_t driver_len)
+/* linux/crypto.h is not public, so we must define the type and masks here,
+ * and hope they are still valid. */
+#ifndef CRYPTO_ALG_TYPE_MASK
+# define CRYPTO_ALG_TYPE_MASK            0x0000000f
+# define CRYPTO_ALG_TYPE_BLKCIPHER       0x00000004
+# define CRYPTO_ALG_TYPE_SKCIPHER        0x00000005
+# define CRYPTO_ALG_TYPE_SHASH           0x0000000e
+# define CRYPTO_ALG_KERN_DRIVER_ONLY     0x00001000
+# define CRYPTO_ALG_INTERNAL             0x00002000
+#endif
+
+struct afalg_alg_info {
+    char alg_name[CRYPTO_MAX_NAME];
+    char driver_name[CRYPTO_MAX_NAME];
+    __u32 priority;
+    __u32 flags;
+};
+
+static struct afalg_alg_info *afalg_alg_list = NULL;
+static int afalg_alg_list_count = 0;
+
+static int prepare_afalg_driver_list(void)
 {
-  int ret = -EFAULT;
+    int ret = -EFAULT;
 
-  /* NETLINK_CRYPTO specific */
-  char buf[CMSG_SPACE(CRYPTO_REPORT_MAXSIZE)];
-  struct nlmsghdr *res_n = (struct nlmsghdr *)buf;
-  struct {
-    struct nlmsghdr n;
-    struct crypto_user_alg cru;
-  } req;
-  struct crypto_user_alg *cru_res = NULL;
+    /* NETLINK_CRYPTO specific */
+    void *buf;
+    struct nlmsghdr *res_n;
+    size_t buf_size;
+    struct {
+        struct nlmsghdr n;
+        struct crypto_user_alg cru;
+    } req;
+    struct crypto_user_alg *cru_res = NULL;
+    struct afalg_alg_info *list;
 
-  /* AF_NETLINK specific */
-  struct sockaddr_nl nl;
-  int nlfd =0;
-  struct iovec iov;
-  struct msghdr msg;
+    /* AF_NETLINK specific */
+    struct sockaddr_nl nl;
+    struct iovec iov;
+    struct msghdr msg;
+    struct rtattr *rta;
+    int nlfd, msg_len, rta_len, list_count;
+    __u32 alg_type;
 
-  if (algo_name == NULL || driver_name == NULL || driver_len < 1)
-    return -EINVAL;
+    memset(&req, 0, sizeof(req));
+    memset(&msg, 0, sizeof(msg));
+    list = afalg_alg_list = NULL;
+    afalg_alg_list_count = 0;
 
-  memset(&req, 0, sizeof(req));
-  memset(&buf, 0, sizeof(buf));
-  memset(&msg, 0, sizeof(msg));
+    req.n.nlmsg_len = NLMSG_LENGTH(sizeof(req.cru));
+    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_MATCH;
+    req.n.nlmsg_type = CRYPTO_MSG_GETALG;
 
-  req.n.nlmsg_len = NLMSG_LENGTH(sizeof(req.cru));
-  req.n.nlmsg_flags = NLM_F_REQUEST;
-  req.n.nlmsg_type = CRYPTO_MSG_GETALG;
-  strncpy(req.cru.cru_name, algo_name, sizeof(req.cru.cru_name) - 1);
-
-  /* open netlink socket */
-  nlfd =  socket(AF_NETLINK, SOCK_RAW, NETLINK_CRYPTO);
-  if (nlfd < 0) {
-    perror("Netlink error: cannot open netlink socket");
-    return -errno;
-  }
-  memset(&nl, 0, sizeof(nl));
-  nl.nl_family = AF_NETLINK;
-  if (bind(nlfd, (struct sockaddr*)&nl, sizeof(nl)) < 0) {
-    perror("Netlink error: cannot bind netlink socket");
-    ret = -errno;
-    goto out;
-  }
-
-  /* sending data */
-  memset(&nl, 0, sizeof(nl));
-  nl.nl_family = AF_NETLINK;
-  iov.iov_base = (void*) &req.n;
-  iov.iov_len = req.n.nlmsg_len;
-  msg.msg_name = &nl;
-  msg.msg_namelen = sizeof(nl);
-  msg.msg_iov = &iov;
-  msg.msg_iovlen = 1;
-  if (sendmsg(nlfd, &msg, 0) < 0) {
-    perror("Netlink error: sendmsg failed");
-    ret = -errno;
-    goto out;
-  }
-
-  iov.iov_base = buf;
-  iov.iov_len = sizeof(buf);
-  while (1) {
-    if ((ret = recvmsg(nlfd, &msg, 0)) <= 0) {
-      if (errno == EINTR || errno == EAGAIN)
-         continue;
-      else if (ret == 0)
-        perror("Nelink error: no data");
-      else
-        perror("Nelink error: netlink receive error");
-      ret = -errno;
-      goto out;
+    /* open netlink socket */
+    nlfd =  socket(AF_NETLINK, SOCK_RAW, NETLINK_CRYPTO);
+    if (nlfd < 0) {
+        if (errno != EPROTONOSUPPORT) /* crypto_user module not available */
+            perror("Netlink error: cannot open netlink socket");
+        return -errno;
     }
-    if ((u_int32_t)ret > sizeof(buf)) {
-      perror("Netlink error: received too much data");
-      ret = -errno;
-      goto out;
+    memset(&nl, 0, sizeof(nl));
+    nl.nl_family = AF_NETLINK;
+    if (bind(nlfd, (struct sockaddr*)&nl, sizeof(nl)) < 0) {
+        perror("Netlink error: cannot bind netlink socket");
+        ret = -errno;
+        goto out;
     }
-    break;
-  }
 
-  ret = -EFAULT;
-  if (res_n->nlmsg_type == NLMSG_ERROR) {
-    ret = 0;
-    goto out;
-  }
+    /* sending data */
+    memset(&nl, 0, sizeof(nl));
+    nl.nl_family = AF_NETLINK;
+    iov.iov_base = (void*) &req.n;
+    iov.iov_len = req.n.nlmsg_len;
+    msg.msg_name = &nl;
+    msg.msg_namelen = sizeof(nl);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    if (sendmsg(nlfd, &msg, 0) < 0) {
+        perror("Netlink error: sendmsg failed");
+        ret = -errno;
+        goto out;
+    }
 
-  if (res_n->nlmsg_type == CRYPTO_MSG_GETALG)
-    cru_res = NLMSG_DATA(res_n);
-  if (!cru_res || res_n->nlmsg_len < NLMSG_SPACE(sizeof(*cru_res)))
-    goto out;
+    /* get the msg size */
+    iov.iov_base = NULL;
+    iov.iov_len = 0;
+    buf_size = recvmsg(nlfd, &msg, MSG_PEEK | MSG_TRUNC);
 
-  strncpy(driver_name, cru_res->cru_driver_name, driver_len -1);
-  driver_name[driver_len -1] = '\0';
-  ret = 1;
+    buf = OPENSSL_zalloc(buf_size);
+    iov.iov_base = buf;
+    iov.iov_len = buf_size;
+
+    while (1) {
+        if ((msg_len = recvmsg(nlfd, &msg, 0)) <= 0) {
+            if (errno == EINTR || errno == EAGAIN)
+                continue;
+            else if (msg_len == 0)
+                perror("Nelink error: no data");
+            else
+                perror("Nelink error: netlink receive error");
+            ret = -errno;
+            goto out;
+        }
+        if ((u_int32_t)msg_len > buf_size) {
+            perror("Netlink error: received too much data");
+            ret = -errno;
+            goto out;
+        }
+        break;
+    }
+
+    ret = -EFAULT;
+    list_count = 0;
+    for (res_n = (struct nlmsghdr *)buf; (ret = NLMSG_OK(res_n, msg_len));
+         res_n = NLMSG_NEXT(res_n, msg_len)) {
+        if (res_n->nlmsg_type == NLMSG_ERROR) {
+            ret = 0;
+            goto out;
+        }
+        cru_res = NLMSG_DATA(res_n);
+        if (res_n->nlmsg_type != CRYPTO_MSG_GETALG
+            || !cru_res || res_n->nlmsg_len < NLMSG_SPACE(sizeof(*cru_res)))
+            continue;
+        alg_type = cru_res->cru_flags & CRYPTO_ALG_TYPE_MASK;
+        if ((alg_type != CRYPTO_ALG_TYPE_SKCIPHER && alg_type != CRYPTO_ALG_TYPE_BLKCIPHER
+	     && alg_type != CRYPTO_ALG_TYPE_SHASH) || cru_res->cru_flags & CRYPTO_ALG_INTERNAL)
+            continue;
+        list = OPENSSL_realloc(afalg_alg_list, (list_count + 1) * sizeof(struct afalg_alg_info));
+        if (list == NULL) {
+            OPENSSL_free(afalg_alg_list);
+            afalg_alg_list = NULL;
+            ret = -ENOMEM;
+            goto out;
+        }
+        memset(&list[list_count], 0, sizeof(struct afalg_alg_info));
+        afalg_alg_list = list;
+
+        rta_len=msg_len;
+        list[list_count].priority = 0;
+        for (rta = (struct rtattr *)(((char *) cru_res)
+                                     + NLMSG_ALIGN(sizeof(struct crypto_user_alg)));
+             (ret = RTA_OK (rta, rta_len)); rta = RTA_NEXT(rta, rta_len)) {
+            if (rta->rta_type == CRYPTOCFGA_PRIORITY_VAL) {
+                list[list_count].priority = *((__u32 *)RTA_DATA(rta));
+                break;
+            }
+        }
+
+        strncpy(list[list_count].alg_name, cru_res->cru_name, sizeof(list->alg_name) - 1);
+        strncpy(list[list_count].driver_name, cru_res->cru_driver_name, sizeof(list->driver_name) - 1);
+        list[list_count].flags = cru_res->cru_flags;
+        list_count++;
+    }
+    ret = afalg_alg_list_count = list_count;
 out:
-  close(nlfd);
-  return ret;
+    close(nlfd);
+    OPENSSL_free(buf);
+    return ret;
 }
 
 static enum afalg_accelerated_t
-afalg_accelerated(const char *driver_name)
+afalg_get_accel_info(const char *alg_name, char *driver_name, size_t driver_len)
 {
-    if (driver_name == NULL)
-        return AFALG_ACCELERATION_UNKNOWN;
+    int i;
+    __u32 priority = 0;
+    enum afalg_accelerated_t accel = AFALG_ACCELERATION_UNKNOWN;
 
-    /* look for known crypto engine names, like cryptodev-linux does */
-    if (!strncmp(driver_name, "artpec", 6)
-        || !strncmp(driver_name, "atmel-", 6)
-        || strstr(driver_name, "-caam")
-        || !strncmp(driver_name, "cavium-", 7)
-        || strstr(driver_name, "-ccp")
-        || strstr(driver_name, "-chcr")
-        || strstr(driver_name, "-dcp")
-        || strstr(driver_name, "geode")
-        || strstr(driver_name, "hifn")
-        || !strncmp(driver_name, "img-", 4)
-        || strstr(driver_name, "-iproc")
-        || strstr(driver_name, "-ixp4xx")
-        || !strncmp(driver_name, "mtk-", 4)
-        || strstr(driver_name, "-mtk")
-        || !strncmp(driver_name, "mv-", 3)
-        || strstr(driver_name, "-n2")
-        || !strncmp(driver_name, "n5_", 3)
-        || strstr(driver_name, "-nx")
-        || !strncmp(driver_name, "omap-", 5)
-        || strstr(driver_name, "-omap")
-        || !strncmp(driver_name, "p8_", 3)
-        || strstr(driver_name, "-padlock")
-        || strstr(driver_name, "-picoxcell")
-        || strstr(driver_name, "-ppc4xx")
-        || !strncmp(driver_name, "qat", 3)
-        || !strncmp(driver_name, "rk-", 3)
-        || strstr(driver_name, "-rk")
-        || strstr(driver_name, "-s5p")
-        || !strncmp(driver_name, "safexcel-", 9)
-        || !strncmp(driver_name, "sahara-", 7)
-        || strstr(driver_name, "-scc")
-        || !strncmp(driver_name, "stm32-", 6)
-        || strstr(driver_name, "-sun4i-ss")
-        || strstr(driver_name, "-talitos")
-        || strstr(driver_name, "-ux500"))
-        return AFALG_ACCELERATED;
-
-    /* these are known asm/software drivers */
-    if (strstr(driver_name, "-3way")
-        || strstr(driver_name, "-aesni")
-        || strstr(driver_name, "-arm")
-        || strstr(driver_name, "-asm")
-        || strstr(driver_name, "-avx")
-        || strstr(driver_name, "-ce")
-        || strstr(driver_name, "-fixed-time")
-        || strstr(driver_name, "-generic")
-        || strstr(driver_name, "-neon")
-        || strstr(driver_name, "-ni")
-        || !strncmp(driver_name, "octeon-", 7)
-        || strstr(driver_name, "-pclmul")
-        || strstr(driver_name, "-ppc-spe")
-        || strstr(driver_name, "-s390")
-        || strstr(driver_name, "-simd")
-        || strstr(driver_name, "-sparc64")
-        || strstr(driver_name, "-sse2")
-        || strstr(driver_name, "-ssse3"))
-        return AFALG_NOT_ACCELERATED;
-
-    return AFALG_ACCELERATION_UNKNOWN;
+    for (i = 0; i < afalg_alg_list_count; i++) {
+        if (strcmp(afalg_alg_list[i].alg_name, alg_name) ||
+	    priority > afalg_alg_list[i].priority)
+	    continue;
+	priority = afalg_alg_list[i].priority;
+        /* driver_name is assumed to be zeroed */
+	strncpy(driver_name, afalg_alg_list[i].driver_name, driver_len - 1);
+        if (afalg_alg_list[i].flags & CRYPTO_ALG_KERN_DRIVER_ONLY)
+	    accel = AFALG_ACCELERATED;
+	else
+	    accel = AFALG_NOT_ACCELERATED;
+    }
+    return accel;
 }
 
 /******************************************************************************
@@ -676,12 +691,11 @@ static void prepare_cipher_methods(void)
 
         /* gather hardware driver information */
         cipher_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
-        if (cipher_driver_info[i].driver_name != NULL
-            && afalg_get_driver_name(cipher_data[i].name,
-                                     cipher_driver_info[i].driver_name,
-                                     CRYPTO_MAX_NAME) > 0)
+        if (cipher_driver_info[i].driver_name != NULL)
             cipher_driver_info[i].accelerated =
-                afalg_accelerated(cipher_driver_info[i].driver_name);
+                afalg_get_accel_info(cipher_data[i].name,
+                                     cipher_driver_info[i].driver_name,
+                                     CRYPTO_MAX_NAME);
 
         blocksize = cipher_data[i].blocksize;
         switch (cipher_data[i].flags & EVP_CIPH_MODE) {
@@ -1108,12 +1122,11 @@ static void prepare_digest_methods(void)
 
         /* gather hardware driver information */
         digest_driver_info[i].driver_name = OPENSSL_zalloc(CRYPTO_MAX_NAME);
-        if (digest_driver_info[i].driver_name != NULL
-            && afalg_get_driver_name(digest_data[i].name,
-                                     digest_driver_info[i].driver_name,
-                                     CRYPTO_MAX_NAME) > 0)
+        if (digest_driver_info[i].driver_name != NULL)
             digest_driver_info[i].accelerated =
-                afalg_accelerated(digest_driver_info[i].driver_name);
+                afalg_get_accel_info(digest_data[i].name,
+                                     digest_driver_info[i].driver_name,
+                                     CRYPTO_MAX_NAME);
 
         if ((known_digest_methods[i] = EVP_MD_meth_new(digest_data[i].nid,
                                                        NID_undef)) == NULL
@@ -1384,8 +1397,11 @@ void engine_load_devcrypto_int()
         return;
     }
 
+    prepare_afalg_driver_list();
     prepare_cipher_methods();
     prepare_digest_methods();
+    OPENSSL_free(afalg_alg_list);
+    afalg_alg_list_count = 0;
 
     if (!ENGINE_set_id(e, "devcrypto")
         || !ENGINE_set_name(e, "AF_ALG engine")
