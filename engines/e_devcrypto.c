@@ -345,7 +345,6 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
     struct cipher_ctx *to_cipher_ctx;
 
     switch (type) {
-
     case EVP_CTRL_COPY:
         if (cipher_ctx == NULL)
             return 1;
@@ -1024,8 +1023,8 @@ static void dump_digest_info(void)
             fprintf(stderr, " (software)");
         else
             fprintf(stderr, " (acceleration status unknown)");
-        if (cipher_driver_info[i].status == DEVCRYPTO_STATUS_FAILURE)
-            fprintf (stderr, ". Cipher setup failed\n");
+        if (digest_driver_info[i].status == DEVCRYPTO_STATUS_FAILURE)
+            fprintf (stderr, ". Digest setup failed\n");
         else if (digest_driver_info[i].status == DEVCRYPTO_STATUS_NO_CIOCCPHASH)
             fprintf(stderr, ", CIOCCPHASH failed\n");
         else
