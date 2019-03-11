@@ -443,8 +443,12 @@ static int devcrypto_ciphers(ENGINE *e, const EVP_CIPHER **cipher,
  * data updates and session copying.  Otherwise, we would be forced to maintain
  * a cache, which is perilous if there's a lot of data coming in (if someone
  * wants to checksum an OpenSSL tarball, for example).
+ * Since digests are implemented reasonably fast in software, and the cost of
+ * the context switch is quite high, it is usually better to just use software.
+ * Digest support is disabled unless USE_DEVCRYPTO_DIGESTS is defined.
  */
-#if defined(CIOCCPHASH) && defined(COP_FLAG_UPDATE) && defined(COP_FLAG_FINAL)
+#if defined(CIOCCPHASH) && defined(COP_FLAG_UPDATE) \
+    && defined(COP_FLAG_FINAL) && defined(USE_DEVCRYPTO_DIGESTS)
 #define IMPLEMENT_DIGEST
 
 /******************************************************************************
