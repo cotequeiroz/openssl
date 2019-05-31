@@ -41,7 +41,7 @@ static int cfd = -1;
 #define DEVCRYPTO_USE_SOFTWARE        1 /* allow software drivers */
 #define DEVCRYPTO_REJECT_SOFTWARE     2 /* only disallow confirmed software drivers */
 
-#define DEVCRYPTO_DEFAULT_USE_SOFTDRIVERS DEVCRYPTO_REJECT_SOFTWARE
+#define DEVCRYPTO_DEFAULT_USE_SOFTDRIVERS DEVCRYPTO_USE_SOFTWARE
 static int use_softdrivers = DEVCRYPTO_DEFAULT_USE_SOFTDRIVERS;
 
 /*
@@ -707,6 +707,7 @@ static int digest_init(EVP_MD_CTX *ctx)
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
+    fprintf(stderr, "digest_init  : ses=%08x, pid=%d\n", digest_ctx->sess.ses, getpid());
     return 1;
 }
 
@@ -736,6 +737,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     if (digest_ctx == NULL)
         return 0;
 
+    fprintf(stderr, "digest_update: ses=%08x, pid=%d, count=%ld\n", digest_ctx->sess.ses, getpid(), count);
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT)) {
         if (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0)
             return 1;
@@ -761,6 +763,7 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
     }
+    fprintf(stderr, "digest_final : ses=%08x, pid=%d\n", digest_ctx->sess.ses, getpid());
 
     return 1;
 }
@@ -776,6 +779,7 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
     if (digest_from == NULL || digest_from->init_called != 1)
         return 1;
 
+    fprintf(stderr, "digest_copy  : ses=%08x, pid=%d\n", digest_from->sess.ses, getpid());
     if (!digest_init(to)) {
         SYSerr(SYS_F_IOCTL, errno);
         return 0;
@@ -798,6 +802,7 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     if (digest_ctx == NULL)
         return 1;
 
+    fprintf(stderr, "digest_clean : ses=%08x, pid=%d\n", digest_ctx->sess.ses, getpid());
     return clean_devcrypto_session(&digest_ctx->sess);
 }
 
