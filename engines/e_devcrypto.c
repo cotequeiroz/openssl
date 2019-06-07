@@ -37,6 +37,7 @@
  * saner...  why re-open /dev/crypto for every session?
  */
 static int cfd = -1;
+FILE *dfs = NULL;
 #define DEVCRYPTO_REQUIRE_ACCELERATED 0 /* require confirmation of acceleration */
 #define DEVCRYPTO_USE_SOFTWARE        1 /* allow software drivers */
 #define DEVCRYPTO_REJECT_SOFTWARE     2 /* only disallow confirmed software drivers */
@@ -719,6 +720,7 @@ static int digest_init(EVP_MD_CTX *ctx)
 
     memset(&digest_ctx->sess, 0, sizeof(digest_ctx->sess));
     digest_ctx->sess.mac = digest_d->devcryptoid;
+    fprintf(dfs, "digest_init  : ses=%08x, pid=%d\n", digest_ctx->sess.ses, getpid());
     return 1;
 }
 
@@ -742,6 +744,7 @@ static int digest_op(struct digest_ctx *ctx, const void *src, size_t srclen,
     cryp.dst = NULL;
     cryp.mac = res;
     cryp.flags = flags;
+    fprintf(dfs, "digest_op    : ses=%08x, pid=%d, srclen=%zu\n", ctx->sess.ses, getpid(), srclen);
     if ((ret = ioctl(cfd, CIOCCRYPT, &cryp)) < 0)
         SYSerr(SYS_F_IOCTL, errno);
     return ret;
@@ -751,7 +754,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
 {
     struct digest_ctx *digest_ctx =
         (struct digest_ctx *)EVP_MD_CTX_md_data(ctx);
-    void *new_data;
+    char *new_data;
     int ret = 0;
 
     if (count == 0)
@@ -760,6 +763,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t count)
     if (digest_ctx == NULL)
         return 0;
 
+    fprintf(dfs, "digest_update: ses=%08x, pid=%d, count=%zu\n", digest_ctx->sess.ses, getpid(), count);
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
         return (digest_op(digest_ctx, data, count, digest_ctx->digest_res, 0) >= 0);
     if (digest_ctx->inp_count == 0 && count > DIGEST_CACHE_SIZE)
@@ -798,6 +802,7 @@ static int digest_final(EVP_MD_CTX *ctx, unsigned char *md)
     if (md == NULL || digest_ctx == NULL)
         return 0;
 
+    fprintf(dfs, "digest_final : ses=%08x, pid=%d\n", digest_ctx->sess.ses, getpid());
     if (EVP_MD_CTX_test_flags(ctx, EVP_MD_CTX_FLAG_ONESHOT))
         memcpy(md, digest_ctx->digest_res, EVP_MD_CTX_size(ctx));
     else
@@ -819,6 +824,7 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
 
     if (digest_from == NULL)
         return 1;
+    fprintf(dfs, "digest_copy  : ses=%08x, pid=%d\n", digest_from->sess.ses, getpid());
     if (digest_from->inp_count > 0) {
         digest_to->inp_data = OPENSSL_malloc(digest_from->inp_count);
         if (digest_to->inp_data == NULL) {
@@ -857,6 +863,7 @@ static int digest_cleanup(EVP_MD_CTX *ctx)
     if (digest_ctx == NULL || digest_ctx->init_called != 1)
         return 1;
 
+    fprintf(dfs, "digest_clean : ses=%08x, pid=%d\n", digest_ctx->sess.ses, getpid());
     return clean_devcrypto_session(&digest_ctx->sess);
 }
 
@@ -1228,9 +1235,13 @@ static int devcrypto_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
  */
 static int open_devcrypto(void)
 {
+    char tmp_filename[32];
+
     if (cfd >= 0)
         return 1;
 
+    snprintf(tmp_filename, 32, "/tmp/ossl.dbg.%d", getpid());
+    dfs = fopen(tmp_filename, "a");
     if ((cfd = open("/dev/crypto", O_RDWR, 0)) < 0) {
 #ifndef ENGINE_DEVCRYPTO_DEBUG
         if (errno != ENOENT)
@@ -1249,6 +1260,8 @@ static int close_devcrypto(void)
     if (cfd < 0)
         return 1;
     ret = close(cfd);
+    fclose(dfs);
+    dfs=NULL;
     cfd = -1;
     if (ret != 0) {
         fprintf(stderr, "Error closing /dev/crypto: %s\n", strerror(errno));
